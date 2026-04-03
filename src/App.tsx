@@ -3,14 +3,16 @@ import { Chessboard } from 'react-chessboard';
 import { useGameStore } from './store';
 import { RefreshCw, ClipboardType } from 'lucide-react';
 import { useEngine } from './useEngine';
+import { useGameReview } from './useGameReview';
 import { EvalBar } from './components/EvalBar';
 import { MoveBadge } from './components/MoveBadge';
 
 const Board = Chessboard as any;
 
 function App() {
-  const { fen, makeMove, resetGame, history, currentMoveIndex, goToMove, loadPgn } = useGameStore();
+  const { fen, makeMove, resetGame, history, currentMoveIndex, goToMove, loadPgn, classifications } = useGameStore();
   const evaluation = useEngine(fen);
+  const { startReview, isReviewing, progress } = useGameReview();
   const [pgnInput, setPgnInput] = useState('');
   const [showPgnInput, setShowPgnInput] = useState(false);
 
@@ -55,6 +57,13 @@ function App() {
             className="flex items-center gap-2 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 rounded-lg transition-colors text-sm font-medium border border-blue-500/30"
           >
             <ClipboardType size={16} /> Nhập PGN
+          </button>
+          <button 
+            onClick={startReview}
+            disabled={isReviewing || history.length === 0}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium border ${isReviewing ? 'bg-emerald-900/50 text-emerald-500 border-emerald-800 cursor-wait' : 'bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border-emerald-500/30'} ${history.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            {isReviewing ? `Đang phân tích... ${progress}%` : '★ Full Review'}
           </button>
           <button 
             onClick={resetGame}
@@ -143,7 +152,7 @@ function App() {
                         <span className="text-zinc-500 w-4 font-medium text-right text-xs">{rowIndex + 1}.</span>
                         <span className="font-mono font-semibold text-zinc-300">{whiteMove?.san}</span>
                       </div>
-                      <MoveBadge type={whiteMove ? 'none' : 'none'} />
+                      <MoveBadge type={classifications[whiteIndex] || 'none'} />
                     </div>
 
                     {/* Nước đen */}
@@ -153,7 +162,7 @@ function App() {
                         className={`relative py-1 px-3 rounded flex items-center justify-between cursor-pointer transition-colors font-mono font-semibold text-zinc-300 ${currentMoveIndex === blackIndex ? 'bg-zinc-700 shadow-inner' : 'bg-zinc-800/20 hover:bg-zinc-800/60'}`}
                       >
                         {blackMove.san}
-                        <MoveBadge type="none" />
+                        <MoveBadge type={classifications[blackIndex] || 'none'} />
                       </div>
                     ) : (
                       <div className="py-1 px-3 rounded bg-transparent flex items-center" />

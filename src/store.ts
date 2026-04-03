@@ -6,10 +6,12 @@ interface GameState {
   fen: string;
   history: Move[];
   currentMoveIndex: number;
+  classifications: string[];
   makeMove: (move: { from: string; to: string; promotion?: string }) => boolean;
   resetGame: () => void;
   loadPgn: (pgn: string) => boolean;
   goToMove: (index: number) => void;
+  setClassifications: (cls: string[]) => void;
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -17,6 +19,8 @@ export const useGameStore = create<GameState>((set, get) => ({
   fen: new Chess().fen(),
   history: [],
   currentMoveIndex: -1,
+  classifications: [],
+  setClassifications: (cls) => set({ classifications: cls }),
 
   makeMove: (move) => {
     const { currentMoveIndex, history } = get();
