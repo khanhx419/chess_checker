@@ -7,11 +7,13 @@ interface GameState {
   history: Move[];
   currentMoveIndex: number;
   classifications: string[];
+  scores: number[];
   makeMove: (move: { from: string; to: string; promotion?: string }) => boolean;
   resetGame: () => void;
   loadPgn: (pgn: string) => boolean;
   goToMove: (index: number) => void;
   setClassifications: (cls: string[]) => void;
+  setScores: (scores: number[]) => void;
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -20,7 +22,9 @@ export const useGameStore = create<GameState>((set, get) => ({
   history: [],
   currentMoveIndex: -1,
   classifications: [],
+  scores: [],
   setClassifications: (cls) => set({ classifications: cls }),
+  setScores: (scores) => set({ scores }),
 
   makeMove: (move) => {
     const { currentMoveIndex, history } = get();
@@ -54,7 +58,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   resetGame: () => {
     const newChess = new Chess();
-    set({ chess: newChess, fen: newChess.fen(), history: [], currentMoveIndex: -1 });
+    set({ chess: newChess, fen: newChess.fen(), history: [], currentMoveIndex: -1, classifications: [], scores: [] });
   },
 
   loadPgn: (pgn) => {
@@ -66,7 +70,9 @@ export const useGameStore = create<GameState>((set, get) => ({
         chess: newChess, 
         fen: newChess.fen(), 
         history: newHistory,
-        currentMoveIndex: newHistory.length - 1
+        currentMoveIndex: newHistory.length - 1,
+        classifications: [],
+        scores: []
       });
       return true;
     } catch (e) {

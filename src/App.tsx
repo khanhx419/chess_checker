@@ -6,11 +6,12 @@ import { useEngine } from './useEngine';
 import { useGameReview } from './useGameReview';
 import { EvalBar } from './components/EvalBar';
 import { MoveBadge } from './components/MoveBadge';
+import { EvalGraph } from './components/EvalGraph';
 
 const Board = Chessboard as any;
 
 function App() {
-  const { fen, makeMove, resetGame, history, currentMoveIndex, goToMove, loadPgn, classifications } = useGameStore();
+  const { fen, makeMove, resetGame, history, currentMoveIndex, goToMove, loadPgn, classifications, scores } = useGameStore();
   const evaluation = useEngine(fen);
   const { startReview, isReviewing, progress } = useGameReview();
   const [pgnInput, setPgnInput] = useState('');
@@ -23,6 +24,13 @@ function App() {
       promotion: 'q',
     });
     return move;
+  }
+
+  const arrows: any[] = [];
+  if (evaluation.bestMove) {
+    const from = evaluation.bestMove.substring(0, 2);
+    const to = evaluation.bestMove.substring(2, 4);
+    arrows.push([from, to, 'rgba(16, 185, 129, 0.5)']);
   }
 
   function handleLoadPgn() {
@@ -115,6 +123,7 @@ function App() {
               <Board 
                 position={fen} 
                 onPieceDrop={onDrop}
+                customArrows={arrows}
                 customDarkSquareStyle={{ backgroundColor: '#648b61' }}
                 customLightSquareStyle={{ backgroundColor: '#ebecd0' }}
                 customBoardStyle={{ borderRadius: '8px', overflow: 'hidden' }}
@@ -132,6 +141,13 @@ function App() {
             Lịch sử ván đấu
           </h2>
           
+          {/* Đồ thị đánh giá */}
+          {scores.length > 0 && (
+             <div className="relative z-10 mb-2">
+                 <EvalGraph scores={scores} currentIndex={currentMoveIndex} onSelect={(idx) => goToMove(idx)} />
+             </div>
+          )}
+
           <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar relative z-10">
             <div className="grid grid-cols-[3fr_3fr] gap-x-2 gap-y-1.5 text-sm">
               {Array.from({ length: Math.ceil(history.length / 2) }).map((_, rowIndex) => {

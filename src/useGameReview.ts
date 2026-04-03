@@ -3,7 +3,7 @@ import { useGameStore } from './store';
 export type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder' | 'brilliant' | 'book' | 'none';
 
 export function useGameReview() {
-  const { history, setClassifications } = useGameStore();
+  const { history, setClassifications, setScores } = useGameStore();
   const [isReviewing, setIsReviewing] = useState(false);
   const [progress, setProgress] = useState(0);
   const workerRef = useRef<Worker | null>(null);
@@ -15,7 +15,9 @@ export function useGameReview() {
     
     // Tạo mảng kết quả tạm thời
     const newClassifications: Classification[] = Array(history.length).fill('none');
+    const newScores: number[] = Array(history.length).fill(0);
     setClassifications(newClassifications);
+    setScores(newScores);
 
     if (workerRef.current) workerRef.current.terminate();
     const worker = new Worker('/stockfish/stockfish.js');
@@ -104,7 +106,10 @@ export function useGameReview() {
         if (i < 8 && delta > -50) cls = 'book';
 
         newClassifications[i] = cls;
+        newScores[i] = scoreAfter; // Lưu CP của Trắng
+        
         setClassifications([...newClassifications]); // Trigger re-render update
+        setScores([...newScores]);
         setProgress(Math.round(((i + 1) / history.length) * 100));
     }
 
@@ -112,7 +117,7 @@ export function useGameReview() {
     worker.postMessage('quit');
     worker.terminate();
 
-  }, [history, setClassifications]);
+  }, [history, setClassifications, setScores]);
 
   const cancelReview = useCallback(() => {
     if (workerRef.current) {
