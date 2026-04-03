@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Chess, Move } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import { useGameStore } from './store';
 import { RefreshCw, ClipboardType } from 'lucide-react';
@@ -16,6 +17,69 @@ function App() {
   const { startReview, isReviewing, progress } = useGameReview();
   const [pgnInput, setPgnInput] = useState('');
   const [showPgnInput, setShowPgnInput] = useState(false);
+  const [moveFrom, setMoveFrom] = useState('');
+  const [optionSquares, setOptionSquares] = useState({});
+  const [showBestMove, setShowBestMove] = useState(false);
+
+  function getMoveOptions(square: string) {
+    const moves = new Chess(fen).moves({
+      square: square as import('chess.js').Square,
+      verbose: true,
+    }) as Move[];
+    if (moves.length === 0) {
+      setOptionSquares({});
+      return false;
+    }
+
+    const newSquares: Record<string, any> = {};
+    moves.map((move) => {
+      const targetSquare = move.to as import('chess.js').Square;
+      const sourceSquare = square as import('chess.js').Square;
+      const targetPiece = new Chess(fen).get(targetSquare);
+      const sourcePiece = new Chess(fen).get(sourceSquare);
+      const isCapture = targetPiece && sourcePiece && targetPiece.color !== sourcePiece.color;
+      newSquares[move.to] = {
+        background: isCapture
+            ? 'radial-gradient(circle, rgba(0,0,0,.1) 85%, transparent 85%)'
+            : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)',
+        borderRadius: '50%',
+      };
+      return move;
+    });
+    newSquares[square] = {
+      background: 'rgba(255, 255, 0, 0.4)',
+    };
+    setOptionSquares(newSquares);
+    return true;
+  }
+
+  function onSquareClick(square: string) {
+    if (!moveFrom) {
+      const hasMoves = getMoveOptions(square);
+      if (hasMoves) setMoveFrom(square);
+      return;
+    }
+
+    const move = makeMove({
+      from: moveFrom,
+      to: square,
+      promotion: 'q',
+    });
+
+    if (move) {
+      setMoveFrom('');
+      setOptionSquares({});
+      return;
+    }
+
+    const hasMoves = getMoveOptions(square);
+    if (hasMoves) {
+      setMoveFrom(square);
+    } else {
+      setMoveFrom('');
+      setOptionSquares({});
+    }
+  }
 
   function onDrop(sourceSquare: string, targetSquare: string) {
     const move = makeMove({
@@ -23,11 +87,16 @@ function App() {
       to: targetSquare,
       promotion: 'q',
     });
-    return move;
+    if (move) {
+      setMoveFrom('');
+      setOptionSquares({});
+      return true;
+    }
+    return false;
   }
 
   const arrows: any[] = [];
-  if (evaluation.bestMove) {
+  if (showBestMove && evaluation.bestMove) {
     const from = evaluation.bestMove.substring(0, 2);
     const to = evaluation.bestMove.substring(2, 4);
     arrows.push([from, to, 'rgba(16, 185, 129, 0.5)']);
@@ -108,9 +177,15 @@ function App() {
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
               <span className="text-sm font-medium text-zinc-300">Gợi ý tốt nhất:</span>
-              <span className="font-mono text-emerald-400 font-bold bg-emerald-400/10 px-2 py-0.5 rounded">
+              <span className="font-mono text-emerald-400 font-bold bg-emerald-400/10 px-2 py-0.5 rounded mr-2">
                 {evaluation.bestMove || (history.length === 0 ? 'e2e4' : '...')}
               </span>
+              <button 
+                onClick={() => setShowBestMove(!showBestMove)}
+                className={`text-xs px-2 py-1 rounded transition-colors ${showBestMove ? 'bg-emerald-600/30 text-emerald-400' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'}`}
+              >
+                {showBestMove ? 'Tắt Gợi ý' : 'Bật Gợi ý Mũi tên'}
+              </button>
             </div>
             <div className="text-xs text-zinc-500 font-mono">
               Eval: {evaluation.mate !== undefined ? `M${Math.abs(evaluation.mate)}` : (evaluation.cp ? (evaluation.cp/100).toFixed(2) : '0.00')}
@@ -123,6 +198,8 @@ function App() {
               <Board 
                 position={fen} 
                 onPieceDrop={onDrop}
+                onSquareClick={onSquareClick}
+                customSquareStyles={optionSquares}
                 customArrows={arrows}
                 customDarkSquareStyle={{ backgroundColor: '#648b61' }}
                 customLightSquareStyle={{ backgroundColor: '#ebecd0' }}
