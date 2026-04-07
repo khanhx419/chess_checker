@@ -1,6 +1,10 @@
 import { create } from 'zustand';
 import { Chess, Move } from 'chess.js';
 
+export type AppMode = 'preview' | 'play';
+export type PlayerColor = 'w' | 'b';
+export type GameOverState = { winner: 'w' | 'b' | 'draw' | null; reason: string } | null;
+
 interface GameState {
   chess: Chess;
   fen: string;
@@ -8,12 +12,20 @@ interface GameState {
   currentMoveIndex: number;
   classifications: string[];
   scores: number[];
+  mode: AppMode;
+  playerColor: PlayerColor;
+  botElo: number;
+  gameOver: GameOverState;
   makeMove: (move: { from: string; to: string; promotion?: string }) => boolean;
   resetGame: () => void;
   loadPgn: (pgn: string) => boolean;
   goToMove: (index: number) => void;
   setClassifications: (cls: string[]) => void;
   setScores: (scores: number[]) => void;
+  setMode: (mode: AppMode) => void;
+  setPlayerColor: (color: PlayerColor) => void;
+  setBotElo: (elo: number) => void;
+  setGameOver: (state: GameOverState) => void;
 }
 
 export const useGameStore = create<GameState>((set, get) => ({
@@ -23,8 +35,16 @@ export const useGameStore = create<GameState>((set, get) => ({
   currentMoveIndex: -1,
   classifications: [],
   scores: [],
+  mode: 'preview',
+  playerColor: 'w',
+  botElo: 1500,
+  gameOver: null,
   setClassifications: (cls) => set({ classifications: cls }),
   setScores: (scores) => set({ scores }),
+  setMode: (mode) => set({ mode }),
+  setPlayerColor: (playerColor) => set({ playerColor }),
+  setBotElo: (botElo) => set({ botElo }),
+  setGameOver: (gameOver) => set({ gameOver }),
 
   makeMove: (move) => {
     const { currentMoveIndex, history } = get();
@@ -42,11 +62,24 @@ export const useGameStore = create<GameState>((set, get) => ({
         const mainChess = new Chess();
         newHistory.forEach(m => mainChess.move(m));
 
+        let newGameOver: GameOverState = null;
+        if (mainChess.isCheckmate()) {
+          newGameOver = { winner: mainChess.turn() === 'w' ? 'b' : 'w', reason: 'checkmate' };
+        } else if (mainChess.isDraw()) {
+          let reason = 'draw';
+          if (mainChess.isStalemate()) reason = 'stalemate';
+          else if (mainChess.isThreefoldRepetition()) reason = 'repetition';
+          else if (mainChess.isInsufficientMaterial()) reason = 'insufficient material';
+          else reason = '50-move rule';
+          newGameOver = { winner: 'draw', reason };
+        }
+
         set({ 
           chess: mainChess, 
           fen: tempChess.fen(), 
           history: newHistory,
-          currentMoveIndex: newHistory.length - 1
+          currentMoveIndex: newHistory.length - 1,
+          gameOver: newGameOver
         });
         return true;
       }
@@ -58,7 +91,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   resetGame: () => {
     const newChess = new Chess();
-    set({ chess: newChess, fen: newChess.fen(), history: [], currentMoveIndex: -1, classifications: [], scores: [] });
+    set({ chess: newChess, fen: newChess.fen(), history: [], currentMoveIndex: -1, classifications: [], scores: [], gameOver: null });
   },
 
   loadPgn: (pgn) => {
@@ -72,7 +105,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         history: newHistory,
         currentMoveIndex: newHistory.length - 1,
         classifications: [],
-        scores: []
+        scores: [],
+        gameOver: null
       });
       return true;
     } catch (e) {

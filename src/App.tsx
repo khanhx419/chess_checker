@@ -4,6 +4,7 @@ import { Chessboard } from 'react-chessboard';
 import { useGameStore } from './store';
 import { RefreshCw, ClipboardType } from 'lucide-react';
 import { useEngine } from './useEngine';
+import { usePlayEngine } from './usePlayEngine';
 import { useGameReview } from './useGameReview';
 import { EvalBar } from './components/EvalBar';
 import { MoveBadge } from './components/MoveBadge';
@@ -12,8 +13,9 @@ import { EvalGraph } from './components/EvalGraph';
 const Board = Chessboard as any;
 
 function App() {
-  const { fen, makeMove, resetGame, history, currentMoveIndex, goToMove, loadPgn, classifications, scores } = useGameStore();
-  const evaluation = useEngine(fen);
+  const { fen, makeMove, resetGame, history, currentMoveIndex, goToMove, loadPgn, classifications, scores, mode, setMode, playerColor, setPlayerColor, botElo, setBotElo, gameOver } = useGameStore();
+  const evaluation = useEngine(fen, mode === 'preview');
+  usePlayEngine(mode === 'play');
   const { startReview, isReviewing, progress } = useGameReview();
   const [pgnInput, setPgnInput] = useState('');
   const [showPgnInput, setShowPgnInput] = useState(false);
@@ -54,6 +56,12 @@ function App() {
   }
 
   function onSquareClick(square: string) {
+    if (mode === 'play') {
+      if (gameOver) return;
+      const isPlayerTurn = (playerColor === 'w' && fen.includes(' w ')) || (playerColor === 'b' && fen.includes(' b '));
+      if (!isPlayerTurn) return;
+    }
+
     if (!moveFrom) {
       const hasMoves = getMoveOptions(square);
       if (hasMoves) setMoveFrom(square);
@@ -82,6 +90,12 @@ function App() {
   }
 
   function onDrop(sourceSquare: string, targetSquare: string) {
+    if (mode === 'play') {
+      if (gameOver) return false;
+      const isPlayerTurn = (playerColor === 'w' && fen.includes(' w ')) || (playerColor === 'b' && fen.includes(' b '));
+      if (!isPlayerTurn) return false;
+    }
+
     const move = makeMove({
       from: sourceSquare,
       to: targetSquare,
@@ -115,33 +129,58 @@ function App() {
     <div className="min-h-screen bg-zinc-950 text-slate-200 flex flex-col">
       <header className="p-4 border-b border-zinc-800 bg-zinc-900/50 flex justify-between items-center z-20">
         <div className="flex gap-4 items-center">
-          <h1 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-500">
+          <h1 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-500 lg:mr-4 shrink-0">
             Chess Checker Pro
           </h1>
-          {evaluation.depth ? (
-            <span className="text-xs px-2 py-1 bg-zinc-800 rounded text-zinc-400 font-mono">
+
+          <div className="flex bg-zinc-800 rounded-lg p-1">
+            <button
+               onClick={() => {
+                 if (mode !== 'play') {
+                   setMode('play');
+                   resetGame();
+                 }
+               }}
+               className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-all ${mode === 'play' ? 'bg-emerald-600 text-white shadow-md' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'}`}
+            >
+              Chơi vs Máy
+            </button>
+            <button
+               onClick={() => setMode('preview')}
+               className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-all ${mode === 'preview' ? 'bg-blue-600 text-white shadow-md' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'}`}
+            >
+              Phân tích
+            </button>
+          </div>
+
+          {mode === 'preview' && (evaluation.depth ? (
+            <span className="hidden sm:inline-block text-xs px-2 py-1 bg-zinc-800 rounded text-zinc-400 font-mono">
               Depth: {evaluation.depth}
             </span>
           ) : (
-            <span className="text-xs px-2 py-1 bg-zinc-800 rounded text-zinc-500 font-mono animate-pulse">
+            <span className="hidden sm:inline-block text-xs px-2 py-1 bg-zinc-800 rounded text-zinc-500 font-mono animate-pulse">
               Engine loading...
             </span>
-          )}
+          ))}
         </div>
         <div className="flex gap-2">
-           <button 
-            onClick={() => setShowPgnInput(!showPgnInput)}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 rounded-lg transition-colors text-sm font-medium border border-blue-500/30"
-          >
-            <ClipboardType size={16} /> Nhập PGN
-          </button>
-          <button 
-            onClick={startReview}
-            disabled={isReviewing || history.length === 0}
-            className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium border ${isReviewing ? 'bg-emerald-900/50 text-emerald-500 border-emerald-800 cursor-wait' : 'bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border-emerald-500/30'} ${history.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
-          >
-            {isReviewing ? `Đang phân tích... ${progress}%` : '★ Full Review'}
-          </button>
+          {mode === 'preview' && (
+            <>
+              <button 
+                onClick={() => setShowPgnInput(!showPgnInput)}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 rounded-lg transition-colors text-sm font-medium border border-blue-500/30"
+              >
+                <ClipboardType size={16} /> <span className="hidden sm:inline">Nhập PGN</span>
+              </button>
+              <button 
+                onClick={startReview}
+                disabled={isReviewing || history.length === 0}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium border ${isReviewing ? 'bg-emerald-900/50 text-emerald-500 border-emerald-800 cursor-wait' : 'bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border-emerald-500/30'} ${history.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {isReviewing ? `Đang phân tích... ${progress}%` : '★ Full Review'}
+              </button>
+            </>
+          )}
           <button 
             onClick={resetGame}
             className="flex items-center gap-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700/80 rounded-lg transition-colors text-sm font-medium border border-zinc-700"
@@ -173,34 +212,37 @@ function App() {
         <div className="flex flex-col items-center justify-center bg-zinc-900/40 rounded-3xl p-8 border border-zinc-800/80 shadow-2xl relative">
           
           {/* Best move suggestion UI */}
-          <div className="w-full max-w-[650px] mb-4 flex items-center justify-between bg-zinc-800/40 border border-zinc-700/50 rounded-lg px-4 py-2 opacity-90 transition-opacity">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-              <span className="text-sm font-medium text-zinc-300">Gợi ý tốt nhất:</span>
-              <span className="font-mono text-emerald-400 font-bold bg-emerald-400/10 px-2 py-0.5 rounded mr-2">
-                {evaluation.bestMove || (history.length === 0 ? 'e2e4' : '...')}
-              </span>
-              <button 
-                onClick={() => setShowBestMove(!showBestMove)}
-                className={`text-xs px-2 py-1 rounded transition-colors ${showBestMove ? 'bg-emerald-600/30 text-emerald-400' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'}`}
-              >
-                {showBestMove ? 'Tắt Gợi ý' : 'Bật Gợi ý Mũi tên'}
-              </button>
+          {mode === 'preview' && (
+            <div className="w-full max-w-[650px] mb-4 flex items-center justify-between bg-zinc-800/40 border border-zinc-700/50 rounded-lg px-4 py-2 opacity-90 transition-opacity">
+              <div className="flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span className="text-sm font-medium text-zinc-300">Gợi ý tốt nhất:</span>
+                <span className="font-mono text-emerald-400 font-bold bg-emerald-400/10 px-2 py-0.5 rounded mr-2">
+                  {evaluation.bestMove || (history.length === 0 ? 'e2e4' : '...')}
+                </span>
+                <button 
+                  onClick={() => setShowBestMove(!showBestMove)}
+                  className={`text-xs px-2 py-1 rounded transition-colors ${showBestMove ? 'bg-emerald-600/30 text-emerald-400' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'}`}
+                >
+                  {showBestMove ? 'Tắt Gợi ý' : 'Bật Gợi ý Mũi tên'}
+                </button>
+              </div>
+              <div className="text-xs text-zinc-500 font-mono">
+                Eval: {evaluation.mate !== undefined ? `M${Math.abs(evaluation.mate)}` : (evaluation.cp ? (evaluation.cp/100).toFixed(2) : '0.00')}
+              </div>
             </div>
-            <div className="text-xs text-zinc-500 font-mono">
-              Eval: {evaluation.mate !== undefined ? `M${Math.abs(evaluation.mate)}` : (evaluation.cp ? (evaluation.cp/100).toFixed(2) : '0.00')}
-            </div>
-          </div>
+          )}
 
           <div className="flex gap-4 items-center justify-center w-full max-w-[650px] aspect-square relative">
-            <EvalBar evaluation={evaluation} />
+            {mode === 'preview' && <EvalBar evaluation={evaluation} />}
             <div className="flex-1 aspect-square drop-shadow-2xl">
               <Board 
                 position={fen} 
+                boardOrientation={mode === 'play' ? (playerColor === 'w' ? 'white' : 'black') : 'white'}
                 onPieceDrop={onDrop}
                 onSquareClick={onSquareClick}
                 customSquareStyles={optionSquares}
-                customArrows={arrows}
+                customArrows={mode === 'preview' ? arrows : []}
                 customDarkSquareStyle={{ backgroundColor: '#648b61' }}
                 customLightSquareStyle={{ backgroundColor: '#ebecd0' }}
                 customBoardStyle={{ borderRadius: '8px', overflow: 'hidden' }}
@@ -215,11 +257,66 @@ function App() {
           <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/5 blur-3xl rounded-full translate-x-10 -translate-y-10"></div>
           <h2 className="text-lg font-bold border-b border-zinc-800 pb-3 flex items-center gap-2 relative z-10">
             <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"></span>
-            Lịch sử ván đấu
+            {mode === 'play' ? 'Trận đấu' : 'Lịch sử ván đấu'}
           </h2>
           
+          {mode === 'play' && (
+            <div className="p-4 bg-zinc-800/50 rounded-xl mb-2 border border-zinc-700/50 flex flex-col gap-3 z-10 relative">
+               <div className="flex justify-between items-center">
+                 <span className="text-sm text-zinc-400 font-medium">Độ khó (ELO)</span>
+                 <select 
+                   value={botElo} 
+                   onChange={(e) => setBotElo(Number(e.target.value))}
+                   className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-sm rounded focus:ring-emerald-500 focus:border-emerald-500 block p-1.5"
+                   disabled={history.length > 0 && !gameOver}
+                 >
+                   <option value={800}>800 (Dễ nhất)</option>
+                   <option value={1000}>1000 (Dễ)</option>
+                   <option value={1200}>1200 (Trung bình)</option>
+                   <option value={1500}>1500 (Khá)</option>
+                   <option value={1800}>1800 (Khó)</option>
+                   <option value={2000}>2000 (Chuyên gia)</option>
+                   <option value={2500}>2500 (Kiện tướng)</option>
+                   <option value={2850}>2850 (Máy quét)</option>
+                 </select>
+               </div>
+               <div className="flex justify-between items-center">
+                 <span className="text-sm text-zinc-400 font-medium">Bạn cầm quân</span>
+                 <div className="flex gap-1">
+                   <button 
+                     onClick={() => { setPlayerColor('w'); resetGame(); }} 
+                     disabled={history.length > 0 && !gameOver}
+                     className={`w-8 h-8 rounded border flex items-center justify-center text-xl transition-all ${playerColor === 'w' ? 'bg-zinc-200 border-zinc-200 text-zinc-900 shadow-lg' : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
+                   >
+                     ♔
+                   </button>
+                   <button 
+                     onClick={() => { setPlayerColor('b'); resetGame(); }} 
+                     disabled={history.length > 0 && !gameOver}
+                     className={`w-8 h-8 rounded border flex items-center justify-center text-xl transition-all ${playerColor === 'b' ? 'bg-zinc-800 border-zinc-600 text-white shadow-lg' : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:bg-zinc-800'}`}
+                   >
+                     ♚
+                   </button>
+                 </div>
+               </div>
+               
+               {gameOver && (
+                 <div className="mt-2 p-3 bg-zinc-900/80 border border-zinc-700 rounded text-center">
+                   <div className="font-bold text-emerald-400 mb-1">Trận đấu kết thúc!</div>
+                   <div className="text-sm text-zinc-300">
+                     {gameOver.winner === 'draw' ? 'Hòa' : (gameOver.winner === 'w' ? 'Trắng thắng' : 'Đen thắng')} 
+                     <span className="text-zinc-500 ml-1">({gameOver.reason})</span>
+                   </div>
+                   <button onClick={() => setMode('preview')} className="mt-2 w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm font-medium transition-colors">
+                     Xem lại ván đấu
+                   </button>
+                 </div>
+               )}
+            </div>
+          )}
+
           {/* Đồ thị đánh giá */}
-          {scores.length > 0 && (
+          {mode === 'preview' && scores.length > 0 && (
              <div className="relative z-10 mb-2">
                  <EvalGraph scores={scores} currentIndex={currentMoveIndex} onSelect={(idx) => goToMove(idx)} />
              </div>

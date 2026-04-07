@@ -2,6 +2,23 @@ import { useState, useRef, useCallback } from 'react';
 import { useGameStore } from './store';
 export type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder' | 'brilliant' | 'book' | 'none';
 
+// Helper removed
+
+/**
+ * Wait for a specific response from the worker (e.g. "uciok", "readyok").
+ */
+function waitForMessage(worker: Worker, target: string): Promise<void> {
+  return new Promise((resolve) => {
+    const handler = (e: MessageEvent) => {
+      if (typeof e.data === 'string' && e.data.includes(target)) {
+        worker.removeEventListener('message', handler);
+        resolve();
+      }
+    };
+    worker.addEventListener('message', handler);
+  });
+}
+
 export function useGameReview() {
   const { history, setClassifications, setScores } = useGameStore();
   const [isReviewing, setIsReviewing] = useState(false);
@@ -20,10 +37,17 @@ export function useGameReview() {
     setScores(newScores);
 
     if (workerRef.current) workerRef.current.terminate();
+    
+    // Create worker directly (COEP headers removed, safe now)
     const worker = new Worker('/stockfish/stockfish.js');
     workerRef.current = worker;
-    
+
+    // --- UCI Handshake ---
     worker.postMessage('uci');
+    await waitForMessage(worker, 'uciok');
+
+    worker.postMessage('isready');
+    await waitForMessage(worker, 'readyok');
 
     // Hàm trả về Promise đánh giá 1 FEN
     const evaluateFen = (fen: string, depth = 12): Promise<{ cp: number, mate?: number }> => {
@@ -54,44 +78,32 @@ export function useGameReview() {
     const getWhiteScore = (fen: string, evalResult: { cp: number, mate?: number }) => {
       const isBlackToMove = fen.includes(' b ');
       if (evalResult.mate !== undefined) {
-        // Mate dương là tốt cho bên đi, âm là xấu
         const mateIn = evalResult.mate;
         return isBlackToMove ? -mateIn * 10000 : mateIn * 10000;
-        // Quy đổi mate ra điểm rất cao để so sánh (10000)
       }
       return isBlackToMove ? -evalResult.cp : evalResult.cp;
     };
 
     // Duyệt qua từng nước đi
     for (let i = 0; i < history.length; i++) {
-        // Để UI không crash, chia nhỏ thời gian xử lý
         await new Promise(r => setTimeout(r, 10));
 
         const move = history[i];
         const beforeFen = move.before;
         const afterFen = move.after;
 
-        // Đánh giá FEN n-1
         const evalBefore = await evaluateFen(beforeFen, 12);
         const scoreBefore = getWhiteScore(beforeFen, evalBefore);
 
-        // Đánh giá FEN n
         const evalAfter = await evaluateFen(afterFen, 12);
         const scoreAfter = getWhiteScore(afterFen, evalAfter);
 
-        // Tính Delta theo góc nhìn của người vừa đi
-        // Nếu Trắng đi (trước đó Trắng To Move), muốn Delta dương = tốt lên, Delta âm = kém đi
-        // Delta = ScoreAfter - ScoreBefore (Đối với trắng)
-        // Delta = ScoreBefore - ScoreAfter (Đối với đen)
         const isWhiteMove = move.color === 'w';
         const delta = isWhiteMove ? (scoreAfter - scoreBefore) : (scoreBefore - scoreAfter);
 
-        // Phân loại đơn giản
         let cls: Classification = 'none';
         
-        // Nếu chuyển từ thế đang bị chiếu hết sang an toàn, hoặc đi sai bị mate
         if (Math.abs(delta) > 5000) {
-            // Mate detection delta
             cls = delta < 0 ? 'blunder' : 'best';
         } else {
             if (delta > -20) cls = 'best';
@@ -102,13 +114,12 @@ export function useGameReview() {
             else cls = 'blunder';
         }
 
-        // Ưu tiên book cho 4 nước đầu
         if (i < 8 && delta > -50) cls = 'book';
 
         newClassifications[i] = cls;
-        newScores[i] = scoreAfter; // Lưu CP của Trắng
+        newScores[i] = scoreAfter;
         
-        setClassifications([...newClassifications]); // Trigger re-render update
+        setClassifications([...newClassifications]);
         setScores([...newScores]);
         setProgress(Math.round(((i + 1) / history.length) * 100));
     }
