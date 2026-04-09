@@ -1,7 +1,7 @@
 # Chess Checker Pro — Project Reference
 
 > **Mục đích file này**: Tài liệu tham chiếu nhanh toàn bộ dự án. Khi cần chỉnh sửa/phát triển, đọc file này thay vì quét toàn bộ project.
-> **Cập nhật lần cuối**: 2026-04-07
+> **Cập nhật lần cuối**: 2026-04-09
 
 ---
 
@@ -10,9 +10,10 @@
 **Chess Checker Pro** là ứng dụng web phân tích cờ vua, cho phép:
 - Chơi cờ trực tiếp trên bàn cờ tương tác (click-to-move & drag-and-drop)
 - Nhập PGN để phân tích ván đấu
-- Đánh giá real-time mỗi nước đi bằng Stockfish (WebWorker)
+- Đánh giá real-time mỗi nước đi bằng Stockfish (WebWorker), tự động phân loại nước đi khi rẽ nhánh mới
 - Full Review — phân tích toàn bộ ván đấu, phân loại từng nước (best, blunder, mistake, ...)
 - Hiển thị EvalBar (thanh đánh giá), EvalGraph (đồ thị đánh giá), gợi ý nước đi tốt nhất
+- Hỗ trợ xoay bàn cờ (Flip board) và hiển thị Icon đánh giá trực tiếp trên ô cờ (chess.com style)
 
 **Tech stack**: React 19 + TypeScript + Vite 8 + TailwindCSS 3 + Zustand 5
 
@@ -217,10 +218,11 @@ type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' |
 1. Tạo Worker Stockfish riêng (không dùng chung với `useEngine`)
 2. Duyệt qua từng nước trong `history[]`
 3. Với mỗi nước: đánh giá FEN **trước** và **sau** nước đi (depth 12)
-4. Tính `delta` = sự thay đổi điểm từ góc người vừa đi
-5. Phân loại theo bảng trên
-6. Cập nhật `setClassifications` và `setScores` sau mỗi nước (real-time update UI)
-7. Kết thúc: terminate Worker
+4. **Sửa lỗi treo**: Engine có thể trả về `bestmove` trước khi đạt `depth 12` ở các thế cờ đơn giản. Hàm đánh giá hiện tại sẽ tự động chốt điểm ngay khi có `bestmove` để tránh loop vô tận.
+5. Tính `delta` = sự thay đổi điểm từ góc người vừa đi
+6. Phân loại theo bảng trên
+7. Cập nhật `setClassifications` và `setScores` sau mỗi nước (real-time update UI)
+8. Kết thúc: terminate Worker
 
 ---
 
@@ -236,6 +238,8 @@ type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' |
 | `moveFrom` | `string` | Ô đang chọn (click-to-move) |
 | `optionSquares` | `object` | Custom styles hiện ô có thể đi |
 | `showBestMove` | `boolean` | Hiện mũi tên gợi ý nước tốt nhất |
+| `isFlipped` | `boolean` | Trạng thái xoay bàn cờ |
+| `pendingClassIdx` | `number` | Index nước đi đang chờ engine đánh giá real-time (khi rẽ nhánh) |
 
 **Các hàm chính**:
 | Hàm | Mô tả |
@@ -244,6 +248,7 @@ type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' |
 | `onSquareClick(square)` | Xử lý click-to-move (2 click: chọn nguồn → chọn đích) |
 | `onDrop(source, target)` | Xử lý drag-and-drop. Auto promote Queen |
 | `handleLoadPgn()` | Load PGN từ input, alert nếu không hợp lệ |
+| `Real-time Classification` | Khi người dùng đi 1 nước mới (rẽ nhánh), Engine sẽ đánh giá và tự động gán nhãn (Best, Blunder...) ngay lập tức sau khi đạt depth 10. |
 
 **Layout** (2 cột trên desktop):
 1. **Cột trái**: Bàn cờ + EvalBar + Gợi ý nước tốt nhất
@@ -358,5 +363,9 @@ User click "Full Review"
 - **Auto-promote**: Luôn promote Queen (`promotion: 'q'`)
 - **Depth**: Real-time eval dùng depth 16, Full Review dùng depth 12
 - **FEN perspective**: Score từ Stockfish luôn từ góc "side to move" → cần đổi dấu khi Đen đi
+- **Real-time Branch Eval**: Khi rẽ nhánh, code sẽ capture điểm `cp` TRƯỚC nước đi, đợi Engine đạt depth 10 ở FEN SAU nước đi rồi mới tính Delta để phân loại (tránh race condition). Khi FEN thay đổi, bắt buộc phải reset `depth` cục bộ về 0 trong `useEngine` để tránh `useEffect` kích hoạt đo lường rác do lấy nhầm depth của FEN cũ.
+- **SVG Overlay**: Icon đánh giá (Best, Blunder...) được inject vào bàn cờ thông qua `customSquareStyles` sử dụng SVG Data URI, đặt ở góc `top right` của ô cờ.
+- **React-Chessboard Props**: Các tham số như `position`, `customArrows`, `customSquareStyles`, `onPieceDrop`, `onSquareClick`... phải nằm ở cấp cao nhất của prop (top-level) thay vì bao bọc bởi `options={{...}}` như một số phiên bản cũ hay cấu trúc tùy chỉnh, nếu không chức năng render UI (mũi tên, tô màu ô cờ) sẽ không hoạt động.
 - **App.css**: File CSS template cũ, không ảnh hưởng UI hiện tại — có thể xóa
 - **`clsx` và `tailwind-merge`**: Đã install nhưng chưa sử dụng trong code hiện tại
+

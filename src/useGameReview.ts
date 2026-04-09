@@ -20,21 +20,21 @@ function waitForMessage(worker: Worker, target: string): Promise<void> {
 }
 
 export function useGameReview() {
-  const { history, setClassifications, setScores } = useGameStore();
+  const { getActiveLine, updateNode } = useGameStore();
   const [isReviewing, setIsReviewing] = useState(false);
   const [progress, setProgress] = useState(0);
   const workerRef = useRef<Worker | null>(null);
 
   const startReview = useCallback(async () => {
-    if (history.length === 0) return;
+    const line = getActiveLine();
+    if (line.length === 0) return;
     setIsReviewing(true);
     setProgress(0);
     
-    // Tạo mảng kết quả tạm thời
-    const newClassifications: Classification[] = Array(history.length).fill('none');
-    const newScores: number[] = Array(history.length).fill(0);
-    setClassifications(newClassifications);
-    setScores(newScores);
+    // Clear existing scores for this line
+    line.forEach(node => {
+      updateNode(node.id, { classification: 'none', score: null });
+    });
 
     if (workerRef.current) workerRef.current.terminate();
     
@@ -52,20 +52,27 @@ export function useGameReview() {
     // Hàm trả về Promise đánh giá 1 FEN
     const evaluateFen = (fen: string, depth = 12): Promise<{ cp: number, mate?: number }> => {
       return new Promise((resolve) => {
+        let lastCp = 0;
+        let lastMate: number | undefined = undefined;
+
         const handler = (e: MessageEvent) => {
           const line = e.data;
-          if (typeof line === 'string' && line.includes(`depth ${depth}`) && (line.includes('score cp') || line.includes('score mate'))) {
+          if (typeof line !== 'string') return;
+
+          const matchCp = line.match(/score cp (-?\d+)/);
+          const matchMate = line.match(/score mate (-?\d+)/);
+          
+          if (matchMate) {
+            lastMate = parseInt(matchMate[1], 10);
+            lastCp = 0;
+          } else if (matchCp) {
+            lastCp = parseInt(matchCp[1], 10);
+            lastMate = undefined;
+          }
+
+          if (line.includes('bestmove')) {
             worker.removeEventListener('message', handler);
-            worker.postMessage('stop');
-            
-            const matchCp = line.match(/score cp (-?\d+)/);
-            const matchMate = line.match(/score mate (-?\d+)/);
-            
-            if (matchMate) {
-              resolve({ cp: 0, mate: parseInt(matchMate[1], 10) });
-            } else if (matchCp) {
-              resolve({ cp: parseInt(matchCp[1], 10) });
-            }
+            resolve({ cp: lastCp, mate: lastMate });
           }
         };
         worker.addEventListener('message', handler);
@@ -85,10 +92,11 @@ export function useGameReview() {
     };
 
     // Duyệt qua từng nước đi
-    for (let i = 0; i < history.length; i++) {
+    for (let i = 0; i < line.length; i++) {
         await new Promise(r => setTimeout(r, 10));
 
-        const move = history[i];
+        const node = line[i];
+        const move = node.move;
         const beforeFen = move.before;
         const afterFen = move.after;
 
@@ -116,19 +124,15 @@ export function useGameReview() {
 
         if (i < 8 && delta > -50) cls = 'book';
 
-        newClassifications[i] = cls;
-        newScores[i] = scoreAfter;
-        
-        setClassifications([...newClassifications]);
-        setScores([...newScores]);
-        setProgress(Math.round(((i + 1) / history.length) * 100));
+        updateNode(node.id, { classification: cls, score: scoreAfter });
+        setProgress(Math.round(((i + 1) / line.length) * 100));
     }
 
     setIsReviewing(false);
     worker.postMessage('quit');
     worker.terminate();
 
-  }, [history, setClassifications, setScores]);
+  }, [getActiveLine, updateNode]);
 
   const cancelReview = useCallback(() => {
     if (workerRef.current) {

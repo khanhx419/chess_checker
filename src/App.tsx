@@ -1,20 +1,22 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Chess, Move } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import { useGameStore } from './store';
-import { RefreshCw, ClipboardType } from 'lucide-react';
+import { RefreshCw, ClipboardType, FlipVertical2 } from 'lucide-react';
 import { useEngine } from './useEngine';
 import { usePlayEngine } from './usePlayEngine';
 import { useGameReview } from './useGameReview';
 import { EvalBar } from './components/EvalBar';
-import { MoveBadge } from './components/MoveBadge';
 import { EvalGraph } from './components/EvalGraph';
+import { getOpeningName } from './utils/openings';
+import { MoveExplanation } from './components/MoveExplanation';
+import { MoveListBranch } from './components/MoveListBranch';
 
 const Board = Chessboard as any;
 
 function App() {
-  const { fen, makeMove, resetGame, history, currentMoveIndex, goToMove, loadPgn, classifications, scores, mode, setMode, playerColor, setPlayerColor, botElo, setBotElo, gameOver } = useGameStore();
-  const evaluation = useEngine(fen, mode === 'preview');
+  const { fen, makeMove, resetGame, nodes, rootNodeIds, currentMoveId, goToMove, getActiveLine, updateNode, loadPgn, mode, setMode, playerColor, setPlayerColor, botElo, setBotElo, gameOver } = useGameStore();
+  const activeLine = getActiveLine();
   usePlayEngine(mode === 'play');
   const { startReview, isReviewing, progress } = useGameReview();
   const [pgnInput, setPgnInput] = useState('');
@@ -22,7 +24,16 @@ function App() {
   const [moveFrom, setMoveFrom] = useState('');
   const [optionSquares, setOptionSquares] = useState({});
   const [showBestMove, setShowBestMove] = useState(false);
+  const [showPlayConfig, setShowPlayConfig] = useState(false);
+  const [userArrows, setUserArrows] = useState<{startSquare: string; endSquare: string; color: string}[]>([]);
+  const [rightClickStart, setRightClickStart] = useState<string | null>(null);
+  const [tempBotElo, setTempBotElo] = useState(botElo);
+  const [tempPlayerColor, setTempPlayerColor] = useState<import('./store').PlayerColor>('w');
+  const [isFlipped, setIsFlipped] = useState(false);
+  const preMoveCpRef = useRef<number | null>(null);
+  const [pendingClassId, setPendingClassId] = useState<string | null>(null);
 
+  const evaluation = useEngine(fen, mode === 'preview' || showBestMove);
   function getMoveOptions(square: string) {
     const moves = new Chess(fen).moves({
       square: square as import('chess.js').Square,
@@ -55,7 +66,70 @@ function App() {
     return true;
   }
 
-  function onSquareClick(square: string) {
+  // Keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+      const activeLine = useGameStore.getState().getActiveLine();
+      const currentMoveId = useGameStore.getState().currentMoveId;
+      const nodes = useGameStore.getState().nodes;
+      const rootNodeIds = useGameStore.getState().rootNodeIds;
+
+      const idx = activeLine.findIndex(n => n.id === currentMoveId);
+
+      if (e.key === 'ArrowLeft') {
+        if (idx > 0) goToMove(activeLine[idx - 1].id);
+        else if (idx === 0) goToMove(null);
+      } else if (e.key === 'ArrowRight') {
+        if (currentMoveId === null && rootNodeIds.length > 0) {
+          goToMove(rootNodeIds[0]);
+        } else if (idx >= 0 && currentMoveId) {
+           const node = nodes[currentMoveId];
+           if (node && node.childrenIds.length > 0) {
+             goToMove(node.childrenIds[0]);
+           }
+        }
+      } else if (e.key === 'ArrowUp') {
+        goToMove(null);
+      } else if (e.key === 'ArrowDown') {
+        if (activeLine.length > 0) goToMove(activeLine[activeLine.length - 1].id);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [goToMove]);
+
+  function clearHighlight() {
+    setOptionSquares({});
+    setMoveFrom('');
+  }
+
+  function onPieceDragBegin({ piece: _piece, square }: { piece: string; square: string }) {
+    if (mode === 'play') {
+      if (gameOver) return;
+      const isPlayerTurn = (playerColor === 'w' && fen.includes(' w ')) || (playerColor === 'b' && fen.includes(' b '));
+      if (!isPlayerTurn) return;
+    }
+    getMoveOptions(square);
+  }
+
+  function onSquareRightClick({ square }: { square: string }) {
+    if (rightClickStart) {
+      if (rightClickStart !== square) {
+        setUserArrows([...userArrows, { startSquare: rightClickStart, endSquare: square, color: 'rgba(255, 0, 0, 0.6)' }]);
+      } else {
+        // Clear arrows if right clicking the same square twice
+        setUserArrows([]);
+      }
+      setRightClickStart(null);
+    } else {
+      setRightClickStart(square);
+    }
+  }
+
+  function onSquareClick({ square }: { square: string }) {
     if (mode === 'play') {
       if (gameOver) return;
       const isPlayerTurn = (playerColor === 'w' && fen.includes(' w ')) || (playerColor === 'b' && fen.includes(' b '));
@@ -68,6 +142,9 @@ function App() {
       return;
     }
 
+    // Capture eval before the move for real-time classification
+    if (mode === 'preview') preMoveCpRef.current = evaluation.cp ?? 0;
+
     const move = makeMove({
       from: moveFrom,
       to: square,
@@ -75,8 +152,9 @@ function App() {
     });
 
     if (move) {
-      setMoveFrom('');
-      setOptionSquares({});
+      if (mode === 'preview') setPendingClassId(useGameStore.getState().currentMoveId);
+      clearHighlight();
+      setUserArrows([]);
       return;
     }
 
@@ -84,17 +162,26 @@ function App() {
     if (hasMoves) {
       setMoveFrom(square);
     } else {
-      setMoveFrom('');
-      setOptionSquares({});
+      clearHighlight();
     }
   }
 
-  function onDrop(sourceSquare: string, targetSquare: string) {
+  function onDrop({ sourceSquare, targetSquare, piece: _piece }: { sourceSquare: string; targetSquare: string; piece: string }) {
+    console.log('onDrop called with:', sourceSquare, targetSquare);
     if (mode === 'play') {
-      if (gameOver) return false;
+      if (gameOver) {
+         console.log('onDrop rejected: gameOver');
+         return false;
+      }
       const isPlayerTurn = (playerColor === 'w' && fen.includes(' w ')) || (playerColor === 'b' && fen.includes(' b '));
-      if (!isPlayerTurn) return false;
+      if (!isPlayerTurn) {
+         console.log('onDrop rejected: not player turn (', playerColor, 'fen:', fen, ')');
+         return false;
+      }
     }
+
+    // Capture eval before the move for real-time classification
+    if (mode === 'preview') preMoveCpRef.current = evaluation.cp ?? 0;
 
     const move = makeMove({
       from: sourceSquare,
@@ -102,18 +189,128 @@ function App() {
       promotion: 'q',
     });
     if (move) {
-      setMoveFrom('');
-      setOptionSquares({});
+      if (mode === 'preview') setPendingClassId(useGameStore.getState().currentMoveId);
+      clearHighlight();
+      setUserArrows([]);
       return true;
     }
+    clearHighlight();
     return false;
   }
 
-  const arrows: any[] = [];
-  if (showBestMove && evaluation.bestMove) {
+  // Real-time classification: wait for engine depth >= 10 on new position
+  useEffect(() => {
+    if (pendingClassId === null || mode !== 'preview') return;
+    // If user navigated away from the pending move, cancel
+    if (pendingClassId !== currentMoveId) {
+      setPendingClassId(null);
+      return;
+    }
+    // Wait for engine to reach sufficient depth on the NEW position
+    if (!evaluation.depth || evaluation.depth < 10) return;
+
+    const currentMoveNode = nodes[pendingClassId];
+    if (!currentMoveNode || preMoveCpRef.current === null) {
+      setPendingClassId(null);
+      return;
+    }
+
+    // Both values are from white's perspective (useEngine already normalizes)
+    const scoreBefore = preMoveCpRef.current;
+    const scoreAfter = evaluation.cp ?? 0;
+    const isWhiteMove = currentMoveNode.move.color === 'w';
+    // For white: positive delta = good for white. For black: eval drop = good for black.
+    const delta = isWhiteMove ? (scoreAfter - scoreBefore) : (scoreBefore - scoreAfter);
+
+    let cls = 'none';
+    if (Math.abs(delta) > 5000) {
+      cls = delta < 0 ? 'blunder' : 'best';
+    } else {
+      if (delta > -20) cls = 'best';
+      else if (delta > -50) cls = 'excellent';
+      else if (delta > -100) cls = 'good';
+      else if (delta > -200) cls = 'inaccuracy';
+      else if (delta > -300) cls = 'mistake';
+      else cls = 'blunder';
+    }
+
+    if (activeLine.length < 8 && delta > -50) cls = 'book';
+
+    updateNode(pendingClassId, { classification: cls, score: scoreAfter });
+
+    setPendingClassId(null);
+    preMoveCpRef.current = null;
+  }, [evaluation.depth, evaluation.cp, pendingClassId, currentMoveId, mode]);
+
+  // Build classification overlay icons on the board
+  const classificationSquareStyles: Record<string, React.CSSProperties> = {};
+  if (mode === 'preview' && currentMoveId && nodes[currentMoveId] && nodes[currentMoveId].classification !== 'none') {
+    const lastMoveNd = nodes[currentMoveId]
+    if (lastMoveNd) {
+      const cls = lastMoveNd.classification;
+      const colorMap: Record<string, string> = {
+        'brilliant': '#1bada6',
+        'best': '#96bc4b',
+        'excellent': '#96bc4b',
+        'good': '#659b3e',
+        'book': '#a88865',
+        'inaccuracy': '#f7c631',
+        'mistake': '#e58f2a',
+        'blunder': '#ca3431',
+      };
+      const symbolMap: Record<string, string> = {
+        'brilliant': '!!',
+        'best': '★',
+        'excellent': '!',
+        'good': '✓',
+        'book': '📖',
+        'inaccuracy': '?!',
+        'mistake': '?',
+        'blunder': '??',
+      };
+      const bgColor = colorMap[cls] || '#666';
+      const symbol = symbolMap[cls] || '';
+      // Create an SVG data URI for the classification badge
+      const svgBadge = `<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='12' cy='12' r='11' fill='${bgColor}' stroke='white' stroke-width='1.5'/><text x='12' y='16' text-anchor='middle' font-size='${symbol.length > 1 ? 10 : 14}' font-weight='bold' fill='white' font-family='Arial'>${symbol}</text></svg>`;
+      const encodedSvg = encodeURIComponent(svgBadge);
+      
+      classificationSquareStyles[lastMoveNd.move.to] = {
+        position: 'relative',
+        backgroundImage: `url("data:image/svg+xml,${encodedSvg}")`,
+        backgroundPosition: 'top right',
+        backgroundRepeat: 'no-repeat',
+        backgroundSize: '30%',
+      };
+      // Also highlight the source and target squares
+      classificationSquareStyles[lastMoveNd.move.from] = {
+        backgroundColor: `${bgColor}44`,
+      };
+      if (!classificationSquareStyles[lastMoveNd.move.to].backgroundColor) {
+        classificationSquareStyles[lastMoveNd.move.to] = {
+          ...classificationSquareStyles[lastMoveNd.move.to],
+          backgroundColor: `${bgColor}44`,
+        };
+      }
+    }
+  }
+
+  // Merge option squares with classification overlay
+  const mergedSquareStyles = { ...classificationSquareStyles, ...optionSquares };
+
+  const arrows: any[] = [...userArrows];
+  if (showBestMove && evaluation.topMoves && evaluation.topMoves.length > 0) {
+    evaluation.topMoves.forEach((moveDetail, index) => {
+      if (!moveDetail.bestMove || moveDetail.bestMove.length < 4) return;
+      const from = moveDetail.bestMove.substring(0, 2);
+      const to = moveDetail.bestMove.substring(2, 4);
+      const opacities = [0.8, 0.4, 0.2];
+      const opacity = opacities[index] || 0.1;
+      arrows.push({ startSquare: from, endSquare: to, color: `rgba(16, 185, 129, ${opacity})` });
+    });
+  } else if (showBestMove && evaluation.bestMove) {
     const from = evaluation.bestMove.substring(0, 2);
     const to = evaluation.bestMove.substring(2, 4);
-    arrows.push([from, to, 'rgba(16, 185, 129, 0.5)']);
+    arrows.push({ startSquare: from, endSquare: to, color: 'rgba(16, 185, 129, 0.5)' });
   }
 
   function handleLoadPgn() {
@@ -134,12 +331,14 @@ function App() {
           </h1>
 
           <div className="flex bg-zinc-800 rounded-lg p-1">
-            <button
+             <button
                onClick={() => {
                  if (mode !== 'play') {
                    setMode('play');
-                   resetGame();
                  }
+                 setTempBotElo(botElo);
+                 setTempPlayerColor(playerColor);
+                 setShowPlayConfig(true);
                }}
                className={`px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md transition-all ${mode === 'play' ? 'bg-emerald-600 text-white shadow-md' : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700'}`}
             >
@@ -174,21 +373,94 @@ function App() {
               </button>
               <button 
                 onClick={startReview}
-                disabled={isReviewing || history.length === 0}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium border ${isReviewing ? 'bg-emerald-900/50 text-emerald-500 border-emerald-800 cursor-wait' : 'bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border-emerald-500/30'} ${history.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
+                disabled={isReviewing || rootNodeIds.length === 0}
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium border ${isReviewing ? 'bg-emerald-900/50 text-emerald-500 border-emerald-800 cursor-wait' : 'bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border-emerald-500/30'} ${rootNodeIds.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 {isReviewing ? `Đang phân tích... ${progress}%` : '★ Full Review'}
               </button>
             </>
           )}
           <button 
-            onClick={resetGame}
+            onClick={() => {
+              setTempBotElo(botElo);
+              setTempPlayerColor(playerColor);
+              setShowPlayConfig(true);
+            }}
             className="flex items-center gap-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700/80 rounded-lg transition-colors text-sm font-medium border border-zinc-700"
           >
             <RefreshCw size={16} /> Ván mới
           </button>
         </div>
       </header>
+
+      {/* PGN Modal Overlay */}
+      {showPlayConfig && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-6 w-full max-w-md flex flex-col gap-6">
+            <h2 className="text-xl font-bold text-center text-white">Cấu hình Ván chơi</h2>
+            
+            <div className="flex flex-col gap-4">
+              <div>
+                <label className="block text-sm font-medium text-zinc-400 mb-2">Độ khó Bot (ELO)</label>
+                <select 
+                   value={tempBotElo} 
+                   onChange={(e) => setTempBotElo(Number(e.target.value))}
+                   className="w-full bg-zinc-800 border border-zinc-700 text-zinc-200 rounded-lg focus:ring-emerald-500 focus:border-emerald-500 block p-2.5"
+                 >
+                   <option value={800}>800 (Dễ nhất)</option>
+                   <option value={1000}>1000 (Dễ)</option>
+                   <option value={1200}>1200 (Trung bình)</option>
+                   <option value={1500}>1500 (Khá)</option>
+                   <option value={1800}>1800 (Khó)</option>
+                   <option value={2000}>2000 (Chuyên gia)</option>
+                   <option value={2500}>2500 (Kiện tướng)</option>
+                   <option value={2850}>2850 (Máy quét)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-zinc-400 mb-2">Bạn cầm quân</label>
+                <div className="flex gap-4">
+                  <button 
+                    onClick={() => setTempPlayerColor('w')}
+                    className={`flex-1 py-3 px-4 rounded-lg border-2 flex items-center justify-center gap-2 transition-all ${tempPlayerColor === 'w' ? 'bg-zinc-200 border-zinc-200 text-zinc-900 font-bold shadow-[0_0_15px_rgba(255,255,255,0.2)]' : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:bg-zinc-700'}`}
+                  >
+                    <span className="text-2xl">♔</span> Trắng
+                  </button>
+                  <button 
+                    onClick={() => setTempPlayerColor('b')}
+                    className={`flex-1 py-3 px-4 rounded-lg border-2 flex items-center justify-center gap-2 transition-all ${tempPlayerColor === 'b' ? 'bg-zinc-800 border-zinc-600 text-white font-bold shadow-[0_0_15px_rgba(0,0,0,0.5)]' : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:bg-zinc-800'}`}
+                  >
+                    <span className="text-2xl">♚</span> Đen
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 mt-2">
+              <button 
+                onClick={() => setShowPlayConfig(false)} 
+                className="px-4 py-2 text-sm font-medium text-zinc-300 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
+              >
+                Hủy
+              </button>
+              <button 
+                onClick={() => {
+                  setPlayerColor(tempPlayerColor);
+                  setBotElo(tempBotElo);
+                  resetGame({ playerColor: tempPlayerColor, botElo: tempBotElo });
+                  setUserArrows([]);
+                  clearHighlight();
+                  setShowPlayConfig(false);
+                }} 
+                className="px-6 py-2 text-sm font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg transition-colors shadow-lg shadow-emerald-900/20"
+              >
+                Bắt đầu chơi
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* PGN Modal Overlay */}
       {showPgnInput && (
@@ -218,7 +490,7 @@ function App() {
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                 <span className="text-sm font-medium text-zinc-300">Gợi ý tốt nhất:</span>
                 <span className="font-mono text-emerald-400 font-bold bg-emerald-400/10 px-2 py-0.5 rounded mr-2">
-                  {evaluation.bestMove || (history.length === 0 ? 'e2e4' : '...')}
+                  {evaluation.bestMove || (rootNodeIds.length === 0 ? 'e2e4' : '...')}
                 </span>
                 <button 
                   onClick={() => setShowBestMove(!showBestMove)}
@@ -237,12 +509,19 @@ function App() {
             {mode === 'preview' && <EvalBar evaluation={evaluation} />}
             <div className="flex-1 aspect-square drop-shadow-2xl">
               <Board 
-                position={fen} 
-                boardOrientation={mode === 'play' ? (playerColor === 'w' ? 'white' : 'black') : 'white'}
-                onPieceDrop={onDrop}
-                onSquareClick={onSquareClick}
-                customSquareStyles={optionSquares}
-                customArrows={mode === 'preview' ? arrows : []}
+                key={mode + playerColor + isFlipped}
+                position={fen}
+                boardOrientation={(() => {
+                    let base: 'white' | 'black' = mode === 'play' ? (playerColor === 'w' ? 'white' : 'black') : 'white';
+                    if (isFlipped) base = base === 'white' ? 'black' : 'white';
+                    return base;
+                  })()}
+                onPieceDrop={(sourceSquare: string, targetSquare: string, piece: string) => onDrop({ sourceSquare, targetSquare, piece })}
+                onSquareClick={(square: string) => onSquareClick({ square })}
+                onPieceDragBegin={(piece: string, square: string) => onPieceDragBegin({ piece, square })}
+                onSquareRightClick={(square: string) => onSquareRightClick({ square })}
+                customSquareStyles={mergedSquareStyles}
+                customArrows={arrows}
                 customDarkSquareStyle={{ backgroundColor: '#648b61' }}
                 customLightSquareStyle={{ backgroundColor: '#ebecd0' }}
                 customBoardStyle={{ borderRadius: '8px', overflow: 'hidden' }}
@@ -250,15 +529,40 @@ function App() {
               />
             </div>
           </div>
+          {/* Flip board button */}
+          <div className="w-full max-w-[650px] mt-2 flex justify-center">
+            <button
+              onClick={() => setIsFlipped(!isFlipped)}
+              className="flex items-center gap-2 px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors text-sm font-medium border border-zinc-700 text-zinc-300"
+              title="Xoay bàn cờ"
+            >
+              <FlipVertical2 size={16} /> Xoay bàn cờ
+            </button>
+          </div>
         </div>
 
         {/* Info & Move List Area */}
-        <div className="flex flex-col gap-4 bg-zinc-900/80 rounded-3xl border border-zinc-800 p-6 shadow-xl relative overflow-hidden">
+        <div className="flex flex-col gap-4 bg-zinc-900/80 rounded-3xl border border-zinc-800 p-6 shadow-xl relative overflow-hidden lg:h-[calc(100vh-6rem)]">
           <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/5 blur-3xl rounded-full translate-x-10 -translate-y-10"></div>
-          <h2 className="text-lg font-bold border-b border-zinc-800 pb-3 flex items-center gap-2 relative z-10">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"></span>
-            {mode === 'play' ? 'Trận đấu' : 'Lịch sử ván đấu'}
-          </h2>
+          
+          <div className="border-b border-zinc-800 pb-3 relative z-10 flex flex-col gap-1">
+            <h2 className="text-lg font-bold flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"></span>
+              {mode === 'play' ? 'Trận đấu' : 'Lịch sử ván đấu'}
+            </h2>
+            {(() => {
+              const currentSanSequence = activeLine.map(n => n.move.san);
+              const openingName = getOpeningName(currentSanSequence);
+              if (openingName) {
+                return (
+                  <div className="text-sm text-zinc-400 italic flex items-center gap-2">
+                    <span className="opacity-50 text-xl">📖</span> {openingName}
+                  </div>
+                );
+              }
+              return null;
+            })()}
+          </div>
           
           {mode === 'play' && (
             <div className="p-4 bg-zinc-800/50 rounded-xl mb-2 border border-zinc-700/50 flex flex-col gap-3 z-10 relative">
@@ -268,7 +572,7 @@ function App() {
                    value={botElo} 
                    onChange={(e) => setBotElo(Number(e.target.value))}
                    className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-sm rounded focus:ring-emerald-500 focus:border-emerald-500 block p-1.5"
-                   disabled={history.length > 0 && !gameOver}
+                   disabled={rootNodeIds.length > 0 && !gameOver}
                  >
                    <option value={800}>800 (Dễ nhất)</option>
                    <option value={1000}>1000 (Dễ)</option>
@@ -280,23 +584,12 @@ function App() {
                    <option value={2850}>2850 (Máy quét)</option>
                  </select>
                </div>
-               <div className="flex justify-between items-center">
+                <div className="flex justify-between items-center">
                  <span className="text-sm text-zinc-400 font-medium">Bạn cầm quân</span>
                  <div className="flex gap-1">
-                   <button 
-                     onClick={() => { setPlayerColor('w'); resetGame(); }} 
-                     disabled={history.length > 0 && !gameOver}
-                     className={`w-8 h-8 rounded border flex items-center justify-center text-xl transition-all ${playerColor === 'w' ? 'bg-zinc-200 border-zinc-200 text-zinc-900 shadow-lg' : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
-                   >
-                     ♔
-                   </button>
-                   <button 
-                     onClick={() => { setPlayerColor('b'); resetGame(); }} 
-                     disabled={history.length > 0 && !gameOver}
-                     className={`w-8 h-8 rounded border flex items-center justify-center text-xl transition-all ${playerColor === 'b' ? 'bg-zinc-800 border-zinc-600 text-white shadow-lg' : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:bg-zinc-800'}`}
-                   >
-                     ♚
-                   </button>
+                   <div className={`px-3 py-1 rounded text-sm font-medium ${playerColor === 'w' ? 'bg-zinc-200 text-zinc-900' : 'bg-zinc-800 text-zinc-300'}`}>
+                     {playerColor === 'w' ? '♔ Trắng' : '♚ Đen'}
+                   </div>
                  </div>
                </div>
                
@@ -307,8 +600,12 @@ function App() {
                      {gameOver.winner === 'draw' ? 'Hòa' : (gameOver.winner === 'w' ? 'Trắng thắng' : 'Đen thắng')} 
                      <span className="text-zinc-500 ml-1">({gameOver.reason})</span>
                    </div>
-                   <button onClick={() => setMode('preview')} className="mt-2 w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm font-medium transition-colors">
-                     Xem lại ván đấu
+                   <button onClick={() => {
+                     setTempBotElo(botElo);
+                     setTempPlayerColor(playerColor);
+                     setShowPlayConfig(true);
+                   }} className="mt-2 w-full py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm font-medium transition-colors">
+                     Chơi ván mới
                    </button>
                  </div>
                )}
@@ -316,64 +613,51 @@ function App() {
           )}
 
           {/* Đồ thị đánh giá */}
-          {mode === 'preview' && scores.length > 0 && (
+          {mode === 'preview' && activeLine.length > 0 && (
              <div className="relative z-10 mb-2">
-                 <EvalGraph scores={scores} currentIndex={currentMoveIndex} onSelect={(idx) => goToMove(idx)} />
+                 <EvalGraph scores={activeLine.map(n => n.score || 0)} currentIndex={activeLine.findIndex(n => n.id === currentMoveId)} onSelect={(idx) => { if (idx >= 0 && idx < activeLine.length) goToMove(activeLine[idx].id) }} />
              </div>
           )}
 
           <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar relative z-10">
-            <div className="grid grid-cols-[3fr_3fr] gap-x-2 gap-y-1.5 text-sm">
-              {Array.from({ length: Math.ceil(history.length / 2) }).map((_, rowIndex) => {
-                const whiteIndex = rowIndex * 2;
-                const blackIndex = rowIndex * 2 + 1;
-                
-                const whiteMove = history[whiteIndex];
-                const blackMove = history[blackIndex];
+            <MoveListBranch 
+              nodes={nodes}
+              rootIds={rootNodeIds}
+              currentMoveId={currentMoveId}
+              goToMove={goToMove}
+            />
 
-                return (
-                  <div key={rowIndex} className="contents group">
-                    {/* Nước trắng */}
-                    <div 
-                      onClick={() => goToMove(whiteIndex)}
-                      className={`relative py-1 px-3 rounded flex items-center justify-between gap-1 cursor-pointer transition-colors ${currentMoveIndex === whiteIndex ? 'bg-zinc-700 shadow-inner' : 'bg-zinc-800/20 hover:bg-zinc-800/60'}`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-zinc-500 w-4 font-medium text-right text-xs">{rowIndex + 1}.</span>
-                        <span className="font-mono font-semibold text-zinc-300">{whiteMove?.san}</span>
-                      </div>
-                      <MoveBadge type={classifications[whiteIndex] || 'none'} />
-                    </div>
-
-                    {/* Nước đen */}
-                    {blackMove ? (
-                      <div 
-                        onClick={() => goToMove(blackIndex)}
-                        className={`relative py-1 px-3 rounded flex items-center justify-between cursor-pointer transition-colors font-mono font-semibold text-zinc-300 ${currentMoveIndex === blackIndex ? 'bg-zinc-700 shadow-inner' : 'bg-zinc-800/20 hover:bg-zinc-800/60'}`}
-                      >
-                        {blackMove.san}
-                        <MoveBadge type={classifications[blackIndex] || 'none'} />
-                      </div>
-                    ) : (
-                      <div className="py-1 px-3 rounded bg-transparent flex items-center" />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-            {history.length === 0 && (
+            {rootNodeIds.length === 0 && (
               <div className="text-zinc-500 text-center mt-12 flex flex-col items-center gap-3">
                 <span className="text-4xl opacity-20">♔</span>
                 <span className="italic">Chưa có nước đi nào.</span>
               </div>
             )}
+            
+            {mode === 'preview' && currentMoveId && nodes[currentMoveId] && nodes[currentMoveId].classification !== 'none' && (
+              <div className="mt-4">
+                <MoveExplanation classification={nodes[currentMoveId].classification} move={nodes[currentMoveId].move} />
+              </div>
+            )}
           </div>
 
           <div className="pt-2 border-t border-zinc-800 flex justify-center gap-2">
-             <button onClick={() => goToMove(-1)} className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-xs">&lt;&lt;</button>
-             <button onClick={() => goToMove(Math.max(-1, currentMoveIndex - 1))} className="px-4 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-xs">&lt;</button>
-             <button onClick={() => goToMove(Math.min(history.length - 1, currentMoveIndex + 1))} className="px-4 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-xs">&gt;</button>
-             <button onClick={() => goToMove(history.length - 1)} className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-xs">&gt;&gt;</button>
+             <button onClick={() => goToMove(null)} className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-xs">&lt;&lt;</button>
+             <button onClick={() => {
+               const idx = activeLine.findIndex(n => n.id === currentMoveId);
+               if (idx > 0) goToMove(activeLine[idx - 1].id);
+               else if (idx === 0) goToMove(null);
+             }} className="px-4 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-xs">&lt;</button>
+             <button onClick={() => {
+                const idx = activeLine.findIndex(n => n.id === currentMoveId);
+                if (currentMoveId === null && rootNodeIds.length > 0) goToMove(rootNodeIds[0]);
+                else if (idx >= 0 && currentMoveId && nodes[currentMoveId]?.childrenIds.length > 0) {
+                  goToMove(nodes[currentMoveId].childrenIds[0]);
+                }
+             }} className="px-4 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-xs">&gt;</button>
+             <button onClick={() => {
+               if (activeLine.length > 0) goToMove(activeLine[activeLine.length - 1].id);
+             }} className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-xs">&gt;&gt;</button>
           </div>
         </div>
       </main>

@@ -1,18 +1,21 @@
 import { useState, useEffect, useRef } from 'react';
 
+export interface MoveDetail {
+  bestMove: string;
+  cp?: number;
+  mate?: number;
+}
+
 export interface EngineEval {
   cp?: number;
   mate?: number;
   bestMove?: string;
   depth?: number;
+  topMoves?: MoveDetail[];
 }
-
-// Helper removed
 
 /**
  * Wait for a specific response from the worker (e.g. "uciok", "readyok").
- * Returns a promise that resolves when the worker posts a message containing
- * the target string.
  */
 function waitForMessage(worker: Worker, target: string): Promise<void> {
   return new Promise((resolve) => {
@@ -27,11 +30,13 @@ function waitForMessage(worker: Worker, target: string): Promise<void> {
 }
 
 export function useEngine(fen: string, enabled: boolean = true) {
-  const [evaluation, setEvaluation] = useState<EngineEval>({ cp: 0, depth: 0 });
+  const [evaluation, setEvaluation] = useState<EngineEval>({ cp: 0, depth: 0, topMoves: [] });
   const workerRef = useRef<Worker | null>(null);
   const readyRef = useRef(false); // Engine fully handshaked & ready
   const fenRef = useRef(fen);
   fenRef.current = fen;
+  // Use a ref to store intermediate multi-pv lines for the current depth to avoid flickering
+  const topMovesRef = useRef<MoveDetail[]>([]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -43,7 +48,6 @@ export function useEngine(fen: string, enabled: boolean = true) {
         if (cancelled) { worker.terminate(); return; }
         workerRef.current = worker;
 
-        // Ensure we catch early errors
         worker.onerror = (e) => console.error("Stockfish Worker error:", e);
 
         // --- UCI Handshake ---
@@ -51,11 +55,11 @@ export function useEngine(fen: string, enabled: boolean = true) {
         await waitForMessage(worker, 'uciok');
         if (cancelled) return;
 
+        worker.postMessage('setoption name MultiPV value 3');
         worker.postMessage('isready');
         await waitForMessage(worker, 'readyok');
         if (cancelled) return;
 
-        // --- Engine is ready, attach the analysis listener ---
         readyRef.current = true;
 
         worker.onmessage = (e) => {
@@ -67,39 +71,53 @@ export function useEngine(fen: string, enabled: boolean = true) {
             const matchCp    = line.match(/score cp (-?\d+)/);
             const matchMate  = line.match(/score mate (-?\d+)/);
             const matchPv    = line.match(/pv (\S+)/);
+            const matchMultiPv = line.match(/multipv (\d+)/);
 
             const depth    = matchDepth ? parseInt(matchDepth[1], 10) : undefined;
             const bestMove = matchPv ? matchPv[1] : undefined;
+            const multiPvIndex = matchMultiPv ? parseInt(matchMultiPv[1], 10) : 1;
 
+            let moveDetails: MoveDetail = { bestMove: bestMove ?? '' };
+            const isBlackToMove = fenRef.current.includes(' b ');
+            
             if (matchMate) {
-              setEvaluation(prev => ({
-                ...prev,
-                mate: parseInt(matchMate[1], 10),
-                cp: undefined,
-                bestMove: bestMove ?? prev.bestMove,
-                depth: depth ?? prev.depth,
-              }));
+              moveDetails.mate = parseInt(matchMate[1], 10);
             } else if (matchCp) {
-              const isBlackToMove = fenRef.current.includes(' b ');
               let cpValue = parseInt(matchCp[1], 10);
               if (isBlackToMove) cpValue = -cpValue;
+              moveDetails.cp = cpValue;
+            }
 
+            if (bestMove) {
+              // Ensure array has enough capacity
+              while (topMovesRef.current.length < multiPvIndex) {
+                 topMovesRef.current.push({ bestMove: '' });
+              }
+              topMovesRef.current[multiPvIndex - 1] = moveDetails;
+            }
+
+            // Only update main evaluation when analyzing the primary line (multipv 1)
+            if (multiPvIndex === 1) {
               setEvaluation(prev => ({
                 ...prev,
-                cp: cpValue,
-                mate: undefined,
+                cp: moveDetails.cp !== undefined ? moveDetails.cp : prev.cp,
+                mate: moveDetails.mate !== undefined ? moveDetails.mate : prev.mate,
                 bestMove: bestMove ?? prev.bestMove,
                 depth: depth ?? prev.depth,
+                topMoves: [...topMovesRef.current].filter((m) => m && m.bestMove),
               }));
+            } else {
+               // Just update topMoves array if it's a secondary line
+               setEvaluation(prev => ({
+                 ...prev,
+                 topMoves: [...topMovesRef.current].filter((m) => m && m.bestMove),
+               }));
             }
           }
         };
 
-        worker.onerror = (e) => {
-          console.error('Stockfish Worker error:', e);
-        };
-
         // --- Start initial analysis ---
+        topMovesRef.current = [];
         worker.postMessage(`position fen ${fenRef.current}`);
         worker.postMessage('go depth 16');
       } catch (err) {
@@ -118,9 +136,11 @@ export function useEngine(fen: string, enabled: boolean = true) {
     };
   }, []);
 
-  // Re-analyse whenever the FEN changes (only if engine is ready and enabled)
+  // Re-analyse whenever the FEN changes 
   useEffect(() => {
     if (workerRef.current && readyRef.current && enabled) {
+      setEvaluation(prev => ({ ...prev, depth: 0 }));
+      topMovesRef.current = [];
       workerRef.current.postMessage('stop');
       workerRef.current.postMessage(`position fen ${fen}`);
       workerRef.current.postMessage('go depth 16');
