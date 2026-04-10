@@ -54,3 +54,22 @@ export function getOpeningName(sanHistory: string[]): string | null {
   }
   return null;
 }
+
+/**
+ * Returns true if the given SAN history (up to and including the latest move)
+ * is a prefix of any known opening line in our dictionary.
+ * E.g. ["e4"] → true, ["e4","e5","Nf3"] → true, ["e4","a6"] → might not match.
+ */
+export function isBookMove(sanHistory: string[]): boolean {
+  if (sanHistory.length === 0) return false;
+  const sequence = sanHistory.join(' ');
+  // Exact match
+  if (OPENING_NAMES[sequence]) return true;
+  // Check if this sequence is a prefix of any longer opening line
+  for (const key of Object.keys(OPENING_NAMES)) {
+    if (key.startsWith(sequence + ' ') || key === sequence) {
+      return true;
+    }
+  }
+  return false;
+}

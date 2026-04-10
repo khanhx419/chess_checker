@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 
 export interface MoveDetail {
   bestMove: string;
@@ -37,6 +37,9 @@ export function useEngine(fen: string, enabled: boolean = true) {
   fenRef.current = fen;
   // Use a ref to store intermediate multi-pv lines for the current depth to avoid flickering
   const topMovesRef = useRef<MoveDetail[]>([]);
+  // Gate to discard stale messages from previous analysis when FEN changes
+  const staleRef = useRef(false);
+  const gateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
@@ -66,6 +69,9 @@ export function useEngine(fen: string, enabled: boolean = true) {
           const line = e.data;
           if (typeof line !== 'string') return;
 
+          // Discard stale messages from previous analysis
+          if (staleRef.current) return;
+
           if (line.includes('info depth')) {
             const matchDepth = line.match(/depth (\d+)/);
             const matchCp    = line.match(/score cp (-?\d+)/);
@@ -81,7 +87,9 @@ export function useEngine(fen: string, enabled: boolean = true) {
             const isBlackToMove = fenRef.current.includes(' b ');
             
             if (matchMate) {
-              moveDetails.mate = parseInt(matchMate[1], 10);
+              let mateValue = parseInt(matchMate[1], 10);
+              if (isBlackToMove) mateValue = -mateValue;
+              moveDetails.mate = mateValue;
             } else if (matchCp) {
               let cpValue = parseInt(matchCp[1], 10);
               if (isBlackToMove) cpValue = -cpValue;
@@ -98,14 +106,18 @@ export function useEngine(fen: string, enabled: boolean = true) {
 
             // Only update main evaluation when analyzing the primary line (multipv 1)
             if (multiPvIndex === 1) {
-              setEvaluation(prev => ({
-                ...prev,
-                cp: moveDetails.cp !== undefined ? moveDetails.cp : prev.cp,
-                mate: moveDetails.mate !== undefined ? moveDetails.mate : prev.mate,
-                bestMove: bestMove ?? prev.bestMove,
-                depth: depth ?? prev.depth,
-                topMoves: [...topMovesRef.current].filter((m) => m && m.bestMove),
-              }));
+              setEvaluation(prev => {
+                const nextCp = moveDetails.cp !== undefined ? moveDetails.cp : (moveDetails.mate !== undefined ? undefined : prev.cp);
+                const nextMate = moveDetails.mate !== undefined ? moveDetails.mate : (moveDetails.cp !== undefined ? undefined : prev.mate);
+                return {
+                  ...prev,
+                  cp: nextCp,
+                  mate: nextMate,
+                  bestMove: bestMove ?? prev.bestMove,
+                  depth: depth ?? prev.depth,
+                  topMoves: [...topMovesRef.current].filter((m) => m && m.bestMove),
+                };
+              });
             } else {
                // Just update topMoves array if it's a secondary line
                setEvaluation(prev => ({
@@ -128,6 +140,7 @@ export function useEngine(fen: string, enabled: boolean = true) {
     return () => {
       cancelled = true;
       readyRef.current = false;
+      if (gateTimerRef.current !== null) clearTimeout(gateTimerRef.current);
       if (workerRef.current) {
         workerRef.current.postMessage('quit');
         workerRef.current.terminate();
@@ -136,10 +149,22 @@ export function useEngine(fen: string, enabled: boolean = true) {
     };
   }, []);
 
-  // Re-analyse whenever the FEN changes 
-  useEffect(() => {
+  // Re-analyse whenever the FEN changes.
+  // useLayoutEffect ensures the stale gate is set synchronously before
+  // any pending worker messages can be processed by the event loop.
+  useLayoutEffect(() => {
     if (workerRef.current && readyRef.current && enabled) {
-      setEvaluation(prev => ({ ...prev, depth: 0 }));
+      // Gate stale messages from previous analysis.
+      // Without this, in-flight 'info depth' messages from the OLD position
+      // can update evaluation state AFTER the depth reset, causing the
+      // classification effect to fire with stale cp ≈ preMoveCp → delta ≈ 0 → "best".
+      staleRef.current = true;
+      if (gateTimerRef.current !== null) clearTimeout(gateTimerRef.current);
+      gateTimerRef.current = setTimeout(() => {
+        staleRef.current = false;
+      }, 10);
+
+      setEvaluation(prev => ({ ...prev, depth: 0, bestMove: undefined }));
       topMovesRef.current = [];
       workerRef.current.postMessage('stop');
       workerRef.current.postMessage(`position fen ${fen}`);

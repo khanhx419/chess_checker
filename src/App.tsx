@@ -8,14 +8,14 @@ import { usePlayEngine } from './usePlayEngine';
 import { useGameReview } from './useGameReview';
 import { EvalBar } from './components/EvalBar';
 import { EvalGraph } from './components/EvalGraph';
-import { getOpeningName } from './utils/openings';
+import { getOpeningName, isBookMove } from './utils/openings';
 import { MoveExplanation } from './components/MoveExplanation';
 import { MoveListBranch } from './components/MoveListBranch';
 
 const Board = Chessboard as any;
 
 function App() {
-  const { fen, makeMove, resetGame, nodes, rootNodeIds, currentMoveId, goToMove, getActiveLine, updateNode, loadPgn, mode, setMode, playerColor, setPlayerColor, botElo, setBotElo, gameOver } = useGameStore();
+  const { fen, makeMove, resetGame, nodes, rootNodeIds, currentMoveId, goToMove, getActiveLine, updateNode, loadPgn, mode, setMode, playerColor, setPlayerColor, botElo, setBotElo, gameOver, deleteNode } = useGameStore();
   const activeLine = getActiveLine();
   usePlayEngine(mode === 'play');
   const { startReview, isReviewing, progress } = useGameReview();
@@ -23,7 +23,7 @@ function App() {
   const [showPgnInput, setShowPgnInput] = useState(false);
   const [moveFrom, setMoveFrom] = useState('');
   const [optionSquares, setOptionSquares] = useState({});
-  const [showBestMove, setShowBestMove] = useState(false);
+
   const [showPlayConfig, setShowPlayConfig] = useState(false);
   const [userArrows, setUserArrows] = useState<{startSquare: string; endSquare: string; color: string}[]>([]);
   const [rightClickStart, setRightClickStart] = useState<string | null>(null);
@@ -33,7 +33,7 @@ function App() {
   const preMoveCpRef = useRef<number | null>(null);
   const [pendingClassId, setPendingClassId] = useState<string | null>(null);
 
-  const evaluation = useEngine(fen, mode === 'preview' || showBestMove);
+  const evaluation = useEngine(fen, mode === 'preview');
   function getMoveOptions(square: string) {
     const moves = new Chess(fen).moves({
       square: square as import('chess.js').Square,
@@ -129,27 +129,41 @@ function App() {
     }
   }
 
+  const getIntegratedScore = (evalObj: { cp?: number; mate?: number }) => {
+    if (evalObj.mate !== undefined) {
+      return evalObj.mate > 0 ? 30000 - evalObj.mate * 10 : -30000 - evalObj.mate * 10;
+    }
+    return evalObj.cp ?? 0;
+  };
+
   function onSquareClick({ square }: { square: string }) {
+    console.log('[onSquareClick]', { square, mode, playerColor, fen: fen.substring(fen.indexOf(' ')), gameOver, moveFrom });
     if (mode === 'play') {
-      if (gameOver) return;
+      if (gameOver) { console.log('[onSquareClick] rejected: gameOver'); return; }
       const isPlayerTurn = (playerColor === 'w' && fen.includes(' w ')) || (playerColor === 'b' && fen.includes(' b '));
+      console.log('[onSquareClick] isPlayerTurn:', isPlayerTurn);
       if (!isPlayerTurn) return;
     }
 
     if (!moveFrom) {
+      console.log('[onSquareClick] no moveFrom, getting options for', square);
       const hasMoves = getMoveOptions(square);
+      console.log('[onSquareClick] hasMoves:', hasMoves);
       if (hasMoves) setMoveFrom(square);
       return;
     }
 
+    console.log('[onSquareClick] attempting move:', moveFrom, '->', square);
     // Capture eval before the move for real-time classification
-    if (mode === 'preview') preMoveCpRef.current = evaluation.cp ?? 0;
+    if (mode === 'preview') preMoveCpRef.current = getIntegratedScore(evaluation);
+    const currentBestMove = evaluation.bestMove;
 
     const move = makeMove({
       from: moveFrom,
       to: square,
       promotion: 'q',
-    });
+    }, currentBestMove);
+    console.log('[onSquareClick] makeMove result:', move);
 
     if (move) {
       if (mode === 'preview') setPendingClassId(useGameStore.getState().currentMoveId);
@@ -181,13 +195,14 @@ function App() {
     }
 
     // Capture eval before the move for real-time classification
-    if (mode === 'preview') preMoveCpRef.current = evaluation.cp ?? 0;
+    if (mode === 'preview') preMoveCpRef.current = getIntegratedScore(evaluation);
+    const currentBestMove = evaluation.bestMove;
 
     const move = makeMove({
       from: sourceSquare,
       to: targetSquare,
       promotion: 'q',
-    });
+    }, currentBestMove);
     if (move) {
       if (mode === 'preview') setPendingClassId(useGameStore.getState().currentMoveId);
       clearHighlight();
@@ -210,14 +225,20 @@ function App() {
     if (!evaluation.depth || evaluation.depth < 10) return;
 
     const currentMoveNode = nodes[pendingClassId];
-    if (!currentMoveNode || preMoveCpRef.current === null) {
+    if (!currentMoveNode) {
       setPendingClassId(null);
       return;
     }
 
-    // Both values are from white's perspective (useEngine already normalizes)
-    const scoreBefore = preMoveCpRef.current;
-    const scoreAfter = evaluation.cp ?? 0;
+    // Use parent node's stored score as baseline (reliable, not stale).
+    // Fall back to preMoveCpRef only if parent has no score yet (first move of game).
+    const parentId = currentMoveNode.parentId;
+    const parentNode = parentId ? nodes[parentId] : null;
+    const scoreBefore = parentNode?.score !== null && parentNode?.score !== undefined
+      ? parentNode.score
+      : (preMoveCpRef.current ?? 0);
+
+    const scoreAfter = getIntegratedScore(evaluation);
     const isWhiteMove = currentMoveNode.move.color === 'w';
     // For white: positive delta = good for white. For black: eval drop = good for black.
     const delta = isWhiteMove ? (scoreAfter - scoreBefore) : (scoreBefore - scoreAfter);
@@ -234,13 +255,15 @@ function App() {
       else cls = 'blunder';
     }
 
-    if (activeLine.length < 8 && delta > -50) cls = 'book';
+    // Use dictionary-based book detection instead of heuristic
+    const currentSanHistory = activeLine.map(n => n.move.san);
+    if (isBookMove(currentSanHistory)) cls = 'book';
 
     updateNode(pendingClassId, { classification: cls, score: scoreAfter });
 
     setPendingClassId(null);
     preMoveCpRef.current = null;
-  }, [evaluation.depth, evaluation.cp, pendingClassId, currentMoveId, mode]);
+  }, [evaluation.depth, evaluation.cp, evaluation.mate, pendingClassId, currentMoveId, mode]);
 
   // Build classification overlay icons on the board
   const classificationSquareStyles: Record<string, React.CSSProperties> = {};
@@ -298,20 +321,6 @@ function App() {
   const mergedSquareStyles = { ...classificationSquareStyles, ...optionSquares };
 
   const arrows: any[] = [...userArrows];
-  if (showBestMove && evaluation.topMoves && evaluation.topMoves.length > 0) {
-    evaluation.topMoves.forEach((moveDetail, index) => {
-      if (!moveDetail.bestMove || moveDetail.bestMove.length < 4) return;
-      const from = moveDetail.bestMove.substring(0, 2);
-      const to = moveDetail.bestMove.substring(2, 4);
-      const opacities = [0.8, 0.4, 0.2];
-      const opacity = opacities[index] || 0.1;
-      arrows.push({ startSquare: from, endSquare: to, color: `rgba(16, 185, 129, ${opacity})` });
-    });
-  } else if (showBestMove && evaluation.bestMove) {
-    const from = evaluation.bestMove.substring(0, 2);
-    const to = evaluation.bestMove.substring(2, 4);
-    arrows.push({ startSquare: from, endSquare: to, color: 'rgba(16, 185, 129, 0.5)' });
-  }
 
   function handleLoadPgn() {
     if (loadPgn(pgnInput)) {
@@ -483,49 +492,31 @@ function App() {
         {/* Chessboard Area */}
         <div className="flex flex-col items-center justify-center bg-zinc-900/40 rounded-3xl p-8 border border-zinc-800/80 shadow-2xl relative">
           
-          {/* Best move suggestion UI */}
-          {mode === 'preview' && (
-            <div className="w-full max-w-[650px] mb-4 flex items-center justify-between bg-zinc-800/40 border border-zinc-700/50 rounded-lg px-4 py-2 opacity-90 transition-opacity">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span className="text-sm font-medium text-zinc-300">Gợi ý tốt nhất:</span>
-                <span className="font-mono text-emerald-400 font-bold bg-emerald-400/10 px-2 py-0.5 rounded mr-2">
-                  {evaluation.bestMove || (rootNodeIds.length === 0 ? 'e2e4' : '...')}
-                </span>
-                <button 
-                  onClick={() => setShowBestMove(!showBestMove)}
-                  className={`text-xs px-2 py-1 rounded transition-colors ${showBestMove ? 'bg-emerald-600/30 text-emerald-400' : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'}`}
-                >
-                  {showBestMove ? 'Tắt Gợi ý' : 'Bật Gợi ý Mũi tên'}
-                </button>
-              </div>
-              <div className="text-xs text-zinc-500 font-mono">
-                Eval: {evaluation.mate !== undefined ? `M${Math.abs(evaluation.mate)}` : (evaluation.cp ? (evaluation.cp/100).toFixed(2) : '0.00')}
-              </div>
-            </div>
-          )}
+
 
           <div className="flex gap-4 items-center justify-center w-full max-w-[650px] aspect-square relative">
             {mode === 'preview' && <EvalBar evaluation={evaluation} />}
             <div className="flex-1 aspect-square drop-shadow-2xl">
               <Board 
-                key={mode + playerColor + isFlipped}
-                position={fen}
-                boardOrientation={(() => {
+                options={{
+                  id: "main-board",
+                  position: fen,
+                  boardOrientation: (() => {
                     let base: 'white' | 'black' = mode === 'play' ? (playerColor === 'w' ? 'white' : 'black') : 'white';
                     if (isFlipped) base = base === 'white' ? 'black' : 'white';
                     return base;
-                  })()}
-                onPieceDrop={(sourceSquare: string, targetSquare: string, piece: string) => onDrop({ sourceSquare, targetSquare, piece })}
-                onSquareClick={(square: string) => onSquareClick({ square })}
-                onPieceDragBegin={(piece: string, square: string) => onPieceDragBegin({ piece, square })}
-                onSquareRightClick={(square: string) => onSquareRightClick({ square })}
-                customSquareStyles={mergedSquareStyles}
-                customArrows={arrows}
-                customDarkSquareStyle={{ backgroundColor: '#648b61' }}
-                customLightSquareStyle={{ backgroundColor: '#ebecd0' }}
-                customBoardStyle={{ borderRadius: '8px', overflow: 'hidden' }}
-                animationDuration={200}
+                  })(),
+                  onPieceDrop: ({ piece, sourceSquare, targetSquare }: { piece: any; sourceSquare: string; targetSquare: string }) => onDrop({ sourceSquare, targetSquare: targetSquare ?? '', piece: piece?.pieceType ?? piece }),
+                  onSquareClick: ({ square }: { piece: any; square: string }) => onSquareClick({ square }),
+                  onPieceDrag: ({ piece, square }: { isSparePiece: boolean; piece: any; square: string | null }) => { if (square) onPieceDragBegin({ piece: piece?.pieceType ?? piece, square }); },
+                  onSquareRightClick: ({ square }: { piece: any; square: string }) => onSquareRightClick({ square }),
+                  squareStyles: mergedSquareStyles,
+                  arrows: arrows,
+                  darkSquareStyle: { backgroundColor: '#648b61' },
+                  lightSquareStyle: { backgroundColor: '#ebecd0' },
+                  boardStyle: { borderRadius: '8px', overflow: 'hidden' },
+                  animationDurationInMs: 200,
+                }}
               />
             </div>
           </div>
@@ -636,7 +627,24 @@ function App() {
             
             {mode === 'preview' && currentMoveId && nodes[currentMoveId] && nodes[currentMoveId].classification !== 'none' && (
               <div className="mt-4">
-                <MoveExplanation classification={nodes[currentMoveId].classification} move={nodes[currentMoveId].move} />
+                <MoveExplanation 
+                  classification={nodes[currentMoveId].classification} 
+                  move={nodes[currentMoveId].move}
+                  engineBestMove={nodes[currentMoveId].engineBestMove}
+                  onPlayBestMove={nodes[currentMoveId].engineBestMove ? () => {
+                    const nodeId = currentMoveId;
+                    const bestMoveUci = nodes[nodeId].engineBestMove!;
+                    // Delete the current (bad) node — this also navigates back to parent
+                    deleteNode(nodeId);
+                    // Now play the engine's best move from the restored position
+                    setTimeout(() => {
+                      const from = bestMoveUci.substring(0, 2);
+                      const to = bestMoveUci.substring(2, 4);
+                      const promo = bestMoveUci.length > 4 ? bestMoveUci[4] : 'q';
+                      makeMove({ from, to, promotion: promo });
+                    }, 50);
+                  } : undefined}
+                />
               </div>
             )}
           </div>

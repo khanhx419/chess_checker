@@ -1,7 +1,7 @@
 # Chess Checker Pro — Project Reference
 
 > **Mục đích file này**: Tài liệu tham chiếu nhanh toàn bộ dự án. Khi cần chỉnh sửa/phát triển, đọc file này thay vì quét toàn bộ project.
-> **Cập nhật lần cuối**: 2026-04-09
+> **Cập nhật lần cuối**: 2026-04-11
 
 ---
 
@@ -12,7 +12,8 @@
 - Nhập PGN để phân tích ván đấu
 - Đánh giá real-time mỗi nước đi bằng Stockfish (WebWorker), tự động phân loại nước đi khi rẽ nhánh mới
 - Full Review — phân tích toàn bộ ván đấu, phân loại từng nước (best, blunder, mistake, ...)
-- Hiển thị EvalBar (thanh đánh giá), EvalGraph (đồ thị đánh giá), gợi ý nước đi tốt nhất
+- Hiển thị EvalBar (thanh đánh giá), EvalGraph (đồ thị đánh giá)
+- Nút "Rút lại và đi nước tốt nhất" — tự động undo nước sai và chơi nước engine đề xuất
 - Hỗ trợ xoay bàn cờ (Flip board) và hiển thị Icon đánh giá trực tiếp trên ô cờ (chess.com style)
 
 **Tech stack**: React 19 + TypeScript + Vite 8 + TailwindCSS 3 + Zustand 5
@@ -42,14 +43,19 @@ chess/
 │   ├── index.css               # Global CSS (@tailwind directives)
 │   ├── App.css                 # CSS cũ từ Vite template (không dùng)
 │   ├── App.tsx                 # Component chính — layout, bàn cờ, move list
-│   ├── store.ts                # Zustand store — quản lý state toàn cục
-│   ├── useEngine.ts            # Hook — kết nối Stockfish WebWorker
+│   ├── store.ts                # Zustand store — quản lý state toàn cục (Tree-based)
+│   ├── useEngine.ts            # Hook — kết nối Stockfish WebWorker (có stale gate)
+│   ├── usePlayEngine.ts        # Hook — Bot engine cho chế độ Play vs AI
 │   ├── useGameReview.ts        # Hook — Full Review phân tích toàn bộ ván
 │   ├── assets/                 # (trống hoặc static assets)
+│   ├── utils/
+│   │   └── openings.ts         # Cơ sở dữ liệu khai cuộc (opening name lookup + isBookMove)
 │   └── components/
 │       ├── EvalBar.tsx          # Thanh đánh giá dọc (trắng/đen)
 │       ├── EvalGraph.tsx        # Đồ thị SVG đánh giá theo từng nước
-│       └── MoveBadge.tsx        # Badge phân loại nước đi (★, X, ?, ...)
+│       ├── MoveBadge.tsx        # Badge phân loại nước đi (★, X, ?, ...)
+│       ├── MoveListBranch.tsx   # Danh sách nước đi dạng cây (hỗ trợ biến thể)
+│       └── MoveExplanation.tsx  # Component giải thích nước đi + nút "Đi nước tốt nhất"
 └── dist/                       # Build output
 ```
 
@@ -102,58 +108,78 @@ chess/
 
 ## 4. State Management — `src/store.ts`
 
-Sử dụng **Zustand** với store duy nhất: `useGameStore`
+Sử dụng **Zustand** với store duy nhất: `useGameStore`.
+**Kiến trúc Tree-based**: Lịch sử nước đi được lưu dưới dạng cây (không phải mảng phẳng), cho phép rẽ nhánh không phá hủy (non-destructive branching).
+
+### Interface `MoveNode`
+```typescript
+interface MoveNode {
+  id: string;                    // ID duy nhất (random 8 ký tự hoặc "orig_N" cho PGN)
+  move: Move;                    // chess.js verbose Move object
+  classification: string;        // Phân loại nước đi ('best','blunder','none',...)
+  score: number | null;          // Điểm CP (centipawns) từ góc Trắng
+  parentId: string | null;       // ID nút cha (null = nước đi đầu tiên)
+  childrenIds: string[];         // Mảng ID các nút con (childrenIds[0] = mainline)
+  engineBestMove?: string;       // Nước tốt nhất engine đề xuất (UCI, vd: "e2e4") — lưu lúc đi nước
+}
+```
 
 ### Interface `GameState`
 ```typescript
 interface GameState {
   chess: Chess;                  // Instance chess.js hiện tại
   fen: string;                   // FEN string đang hiển thị trên bàn cờ
-  history: Move[];               // Mảng toàn bộ nước đi (verbose Move object)
-  currentMoveIndex: number;      // Index nước đi đang xem (-1 = vị trí ban đầu)
-  classifications: string[];     // Mảng phân loại mỗi nước ('best','blunder',...)
-  scores: number[];              // Mảng điểm CP (centipawns) từ góc Trắng
+  nodes: Record<string, MoveNode>; // Bản đồ tất cả nút trong cây
+  rootNodeIds: string[];         // ID các nút gốc (nước đi đầu tiên)
+  currentMoveId: string | null;  // ID nước đi đang xem (null = vị trí ban đầu)
   
   mode: 'preview' | 'play';      // Chế độ chơi với máy hoặc phân tích ván đấu tĩnh
   playerColor: 'w' | 'b';        // Màu người chơi cầm trong chế độ chơi
   botElo: number;                // ELO của máy (Stockfish skill level)
-  gameOver: object | null;       // Lưu trạng thái thắng thua (ví dụ mat, hòa)
+  gameOver: GameOverState;       // Lưu trạng thái thắng thua (ví dụ mat, hòa)
 
   // Actions
-  makeMove(move: {from, to, promotion?}): boolean;
-  resetGame(): void;
+  updateNode(id: string, data: Partial<MoveNode>): void;
+  makeMove(move: {from, to, promotion?}, engineBestMove?: string): boolean;
+  deleteNode(id: string): void;  // Xóa node + subtree, navigate về parent
+  resetGame(config?): void;
   loadPgn(pgn: string): boolean;
-  goToMove(index: number): void;
-  setClassifications(cls: string[]): void;
-  setScores(scores: number[]): void;
+  goToMove(id: string | null): void;
+  getActiveLine(): MoveNode[];   // Trả về đường đi từ root đến currentMoveId
+  setMode(mode): void;
+  setPlayerColor(color): void;
+  setBotElo(elo): void;
+  setGameOver(state): void;
 }
 ```
 
 ### Chi tiết actions
 | Action | Mô tả |
 |---|---|
-| `makeMove` | Đi một nước. Nếu đang xem quá khứ → cắt bỏ lịch sử tương lai rồi đi nước mới. Return `true` nếu hợp lệ. |
-| `resetGame` | Reset toàn bộ: Chess mới, xóa history, classifications, scores |
-| `loadPgn` | Parse PGN string, load toàn bộ history (verbose), đặt vị trí cuối cùng |
-| `goToMove` | Nhảy đến nước thứ `index` (-1 = vị trí ban đầu). Chỉ thay `currentMoveIndex` & `fen` |
-| `setClassifications` | Cập nhật mảng phân loại (từ Full Review) |
-| `setScores` | Cập nhật mảng điểm CP (từ Full Review) |
+| `makeMove` | Đi một nước. **Non-destructive**: nếu đang ở giữa ván, tạo nhánh mới thay vì cắt lịch sử. Nếu nước đã tồn tại trong `childrenIds`, chỉ navigate tới. Nhận optional `engineBestMove` UCI string để lưu vào node. Return `true` nếu hợp lệ. |
+| `deleteNode` | Xóa node và toàn bộ subtree. Loại khỏi `childrenIds` của parent (hoặc `rootNodeIds`). Nếu `currentMoveId` nằm trong subtree bị xóa, tự navigate về parent. |
+| `resetGame` | Reset toàn bộ: Chess mới, xóa nodes, rootNodeIds |
+| `loadPgn` | Parse PGN string → convert sang tree nodes (id `orig_0`, `orig_1`, ...) |
+| `goToMove` | Nhảy đến nước có `id`. Nếu `null` → vị trí ban đầu. Chỉ thay `currentMoveId` & `fen` |
+| `updateNode` | Cập nhật partial data cho 1 node (dùng cho classification, score, engineBestMove) |
+| `getActiveLine` | Duyệt từ `currentMoveId` về root, trả về mảng `MoveNode[]` theo thứ tự |
 
 ---
 
 ## 5. Custom Hooks
 
-### `useEngine(fen: string)` — `src/useEngine.ts`
+### `useEngine(fen: string, enabled: boolean)` — `src/useEngine.ts`
 
 **Mục đích**: Kết nối Stockfish WebWorker, trả về đánh giá real-time cho FEN hiện tại.
 
 **Return type**:
 ```typescript
 interface EngineEval {
-  cp?: number;       // Centipawns (từ góc Trắng, đã convert)
-  mate?: number;     // Số nước chiếu hết (dương = Trắng thắng)
-  bestMove?: string; // Nước tốt nhất (UCI format: "e2e4")
-  depth?: number;    // Depth hiện tại
+  cp?: number;        // Centipawns (từ góc Trắng, đã convert)
+  mate?: number;      // Số nước chiếu hết (dương = Trắng thắng)
+  bestMove?: string;  // Nước tốt nhất (UCI format: "e2e4")
+  depth?: number;     // Depth hiện tại
+  topMoves?: MoveDetail[]; // Top 3 nước (MultiPV=3)
 }
 ```
 
@@ -161,13 +187,20 @@ interface EngineEval {
 1. Khởi tạo `new Worker('/stockfish/stockfish.js')` (Trực tiếp, không dùng Blob URL vì không cần COEP Header)
 2. **UCI Handshake (Bắt buộc)**:
    - Gửi `uci` → đợi phản hồi `uciok`
+   - Gửi `setoption name MultiPV value 3` (hiện top 3 nước)
    - Gửi `isready` → đợi phản hồi `readyok`
 3. Sau khi handshake xong, thiết lập `readyRef.current = true`. Lắng nghe sự kiện `onmessage`.
 4. Gửi FEN ban đầu: `position fen <fen>` → `go depth 16`
-5. Khi `fen` thay đổi (và engine đã ready): gửi `stop` → `position fen <fen>` → `go depth 16`
-6. Parse dòng `info depth ...` để lấy `cp`, `mate`, `pv` (bestMove)
-7. **Quan trọng**: Nếu Đen đi (`fen` chứa ` b `) → đổi dấu `cp` để quy chiếu về Trắng
-8. Cleanup: `quit` + `terminate()` khi unmount
+5. Khi `fen` thay đổi (và engine đã ready): **Stale Message Gate** → gửi `stop` → `position fen <fen>` → `go depth 16`
+6. Parse dòng `info depth ... multipv N ...` để lấy `cp`, `mate`, `pv` (bestMove) cho từng line
+7. **Quan trọng**: Nếu Đen đi (`fen` chứa ` b `) → đổi dấu `cp` **và `mate`** để quy chiếu về Trắng
+8. Cleanup: `quit` + `terminate()` khi unmount, clear gate timer
+
+**Stale Message Gate** (fix bug "always best move"):
+- Khi FEN thay đổi, `useLayoutEffect` set `staleRef = true` + timer 50ms.
+- Mọi `info depth` message đến trong 50ms đầu bị discard (vì là tin nhắn cũ từ FEN trước).
+- Sau 50ms, gate mở, chỉ nhận message từ analysis mới.
+- **Lý do**: Không có gate → stale messages có `depth >= 10` và `cp ≈ preMoveCp` → `delta ≈ 0` → luôn classify là "best".
 
 ---
 
@@ -212,17 +245,18 @@ type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' |
 | > -300 | `mistake` |
 | ≤ -300 | `blunder` |
 | \|delta\| > 5000 | Mate detection (`blunder` nếu delta < 0, `best` nếu > 0) |
-| 4 nước đầu & delta > -50 | `book` |
+| Matches `isBookMove()` | `book` (ưu tiên cao nhất — ghi đè delta) |
 
 **Flow**:
 1. Tạo Worker Stockfish riêng (không dùng chung với `useEngine`)
-2. Duyệt qua từng nước trong `history[]`
+2. Duyệt qua từng nước trong `getActiveLine()`
 3. Với mỗi nước: đánh giá FEN **trước** và **sau** nước đi (depth 12)
-4. **Sửa lỗi treo**: Engine có thể trả về `bestmove` trước khi đạt `depth 12` ở các thế cờ đơn giản. Hàm đánh giá hiện tại sẽ tự động chốt điểm ngay khi có `bestmove` để tránh loop vô tận.
-5. Tính `delta` = sự thay đổi điểm từ góc người vừa đi
-6. Phân loại theo bảng trên
-7. Cập nhật `setClassifications` và `setScores` sau mỗi nước (real-time update UI)
-8. Kết thúc: terminate Worker
+4. **Extract `bestmove`**: Hàm `evaluateFen` trả về cả `bestMove` UCI string từ Stockfish output
+5. **Book detection**: Kiểm tra `isBookMove(sanHistory)` — nếu chuỗi SAN khớp opening dictionary → classify `book` ngay, skip delta
+6. Tính `delta` = sự thay đổi điểm từ góc người vừa đi
+7. Phân loại theo bảng trên
+8. **Lưu `engineBestMove`**: Gọi `updateNode(id, { classification, score, engineBestMove })` để cung cấp cho nút "Đi nước tốt nhất"
+9. Kết thúc: terminate Worker
 
 ---
 
@@ -237,9 +271,11 @@ type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' |
 | `showPgnInput` | `boolean` | Hiện/ẩn modal nhập PGN |
 | `moveFrom` | `string` | Ô đang chọn (click-to-move) |
 | `optionSquares` | `object` | Custom styles hiện ô có thể đi |
-| `showBestMove` | `boolean` | Hiện mũi tên gợi ý nước tốt nhất |
 | `isFlipped` | `boolean` | Trạng thái xoay bàn cờ |
-| `pendingClassIdx` | `number` | Index nước đi đang chờ engine đánh giá real-time (khi rẽ nhánh) |
+| `showPlayConfig` | `boolean` | Hiện modal cấu hình Play vs AI |
+| `userArrows` | `array` | Mũi tên vẽ bởi user (right-click drag) |
+| `pendingClassId` | `string | null` | ID node đang chờ engine đánh giá real-time |
+| `preMoveCpRef` | `Ref<number>` | CP trước nước đi (dùng tính delta) |
 
 **Các hàm chính**:
 | Hàm | Mô tả |
@@ -248,13 +284,14 @@ type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' |
 | `onSquareClick(square)` | Xử lý click-to-move (2 click: chọn nguồn → chọn đích) |
 | `onDrop(source, target)` | Xử lý drag-and-drop. Auto promote Queen |
 | `handleLoadPgn()` | Load PGN từ input, alert nếu không hợp lệ |
-| `Real-time Classification` | Khi người dùng đi 1 nước mới (rẽ nhánh), Engine sẽ đánh giá và tự động gán nhãn (Best, Blunder...) ngay lập tức sau khi đạt depth 10. |
+| `Real-time Classification` | Khi người dùng đi 1 nước mới, capture `preMoveCp` + `evaluation.bestMove`, đợi engine depth ≥ 10 trên FEN mới, tính delta để classify. Dùng `isBookMove()` thay vì heuristic để detect book moves. |
+| `onPlayBestMove` callback | Truyền vào `MoveExplanation`. Gọi `deleteNode(currentMoveId)` → `setTimeout` → `makeMove(engineBestMove)` để undo nước sai và tự động đi nước tốt nhất. |
 
 **Layout** (2 cột trên desktop):
-1. **Cột trái**: Bàn cờ + EvalBar + Gợi ý nước tốt nhất
-2. **Cột phải**: Lịch sử ván đấu + EvalGraph + Nút điều hướng (<<, <, >, >>)
+1. **Cột trái**: Bàn cờ + EvalBar
+2. **Cột phải**: Lịch sử ván đấu (MoveListBranch) + EvalGraph + MoveExplanation (có nút "Đi nước tốt nhất") + Nút điều hướng
 
-**Header**: Logo, Depth indicator, nút "Nhập PGN", "Full Review", "Ván mới"
+**Header**: Logo, Mode switcher (Chơi vs Máy / Phân tích), Depth indicator, nút "Nhập PGN", "Full Review", "Ván mới"
 
 ---
 
@@ -305,6 +342,34 @@ Hiển thị badge tròn nhỏ (w-4 h-4) ở góc trên phải mỗi nước đi
 
 ---
 
+### `MoveListBranch` — `src/components/MoveListBranch.tsx`
+
+**Props**: `{ nodes, rootIds, currentMoveId, goToMove, isMainLine? }`
+
+**Logic**:
+- Nhận toàn bộ tree `nodes` và array `rootIds` để render
+- **Main line**: hiển thị dạng grid 2 cột (Trắng | Đen) với số thứ tự lượt
+- **Variations**: hiển thị dạng inline flex-wrap, indent và border-left
+- **Đệ quy**: Duyệt `childrenIds` — phần tử đầu ([0]) là mainline, các phần tử sau ([1+]) là variations, render đệ quy `MoveListBranch` với `isMainLine=false`
+- Mỗi nước hiển thị `MoveBadge` bên cạnh SAN notation
+- Click nước đi → `goToMove(node.id)`
+
+---
+
+### `MoveExplanation` — `src/components/MoveExplanation.tsx`
+
+**Props**: `{ classification: string, move: Move, engineBestMove?: string, onPlayBestMove?: () => void }`
+
+**Logic**:
+- Hiển thị giải thích bằng tiếng Việt cho nước đi dựa trên classification
+- Mỗi loại có `title`, `description`, và `color` riêng
+- Classification types: `blunder`, `mistake`, `inaccuracy`, `good`, `excellent`, `best`, `brilliant`, `book`
+- Render dưới danh sách nước đi khi user click vào nước có classification ≠ 'none'
+- Có animation fade-in slide-up khi xuất hiện
+- **Nút "Rút lại và đi nước tốt nhất"**: Hiển thị khi `engineBestMove` có giá trị và classification là `blunder`, `mistake`, `inaccuracy`, hoặc `good`. Click → gọi `onPlayBestMove()` để xóa nước sai, lùi về parent, và tự đi nước engine đề xuất.
+
+---
+
 ## 7. Styling
 
 - **Framework**: TailwindCSS 3
@@ -344,14 +409,21 @@ content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"]
 ```
 User Action (click/drag/PGN)
   → store.makeMove() / store.loadPgn()
-    → Cập nhật: fen, history, currentMoveIndex
-      → useEngine(fen)  →  Stockfish Worker  →  evaluation (cp, bestMove)
-      → UI re-render: Chessboard, EvalBar, gợi ý
+    → Cập nhật: fen, nodes (tree), currentMoveId
+      → useLayoutEffect: stale gate ON → 50ms → gate OFF
+      → useEngine(fen)  →  Stockfish Worker  →  evaluation (cp, bestMove, topMoves)
+      → UI re-render: Chessboard, EvalBar, MoveListBranch, MoveExplanation
+
+User đi nước mới (rẽ nhánh, preview mode)
+  → Capture preMoveCp → makeMove() → tạo MoveNode mới trong tree
+    → Đợi engine depth ≥ 10 (stale gate đảm bảo data mới)
+      → Tính delta → classify → updateNode(classification, score)
+        → UI: MoveBadge, MoveExplanation, SVG overlay trên bàn cờ
 
 User click "Full Review"
   → useGameReview.startReview()
-    → Worker Stockfish riêng, duyệt từng nước
-      → Cập nhật: classifications[], scores[] (real-time)
+    → Worker Stockfish riêng, duyệt getActiveLine()
+      → Cập nhật: node.classification, node.score (real-time qua updateNode)
         → UI: MoveBadge trên mỗi nước, EvalGraph hiện đồ thị
 ```
 
@@ -361,11 +433,17 @@ User click "Full Review"
 
 - **Stockfish Worker**: File `public/stockfish/stockfish.js` (~1.5MB) — load qua `new Worker('/stockfish/stockfish.js')`
 - **Auto-promote**: Luôn promote Queen (`promotion: 'q'`)
-- **Depth**: Real-time eval dùng depth 16, Full Review dùng depth 12
-- **FEN perspective**: Score từ Stockfish luôn từ góc "side to move" → cần đổi dấu khi Đen đi
-- **Real-time Branch Eval**: Khi rẽ nhánh, code sẽ capture điểm `cp` TRƯỚC nước đi, đợi Engine đạt depth 10 ở FEN SAU nước đi rồi mới tính Delta để phân loại (tránh race condition). Khi FEN thay đổi, bắt buộc phải reset `depth` cục bộ về 0 trong `useEngine` để tránh `useEffect` kích hoạt đo lường rác do lấy nhầm depth của FEN cũ.
+- **Depth**: Real-time eval dùng depth 16 (MultiPV=3), Full Review dùng depth 12
+- **FEN perspective**: Score từ Stockfish luôn từ góc "side to move" → cần đổi dấu **cả `cp` lẫn `mate`** khi Đen đi
+- **Tree-based History**: Lịch sử nước đi dùng cấu trúc cây (`MoveNode` với `parentId`/`childrenIds`). Khi rẽ nhánh, nước mới được thêm vào `childrenIds` của node hiện tại thay vì cắt bỏ lịch sử. `childrenIds[0]` luôn là mainline.
+- **Stale Message Gate (QUAN TRỌNG)**: Khi FEN thay đổi, `useLayoutEffect` trong `useEngine` set `staleRef = true` trong 50ms để discard tin nhắn cũ từ analysis trước. Không có gate → stale messages có `depth ≥ 10` với `cp` của FEN cũ khiến classification luôn ra "best" (vì `delta ≈ 0`). **Phải dùng `useLayoutEffect`** (không phải `useEffect`) để đảm bảo gate được set trước khi bất kỳ macrotask nào (worker onmessage) chạy.
+- **Real-time Branch Eval**: Khi rẽ nhánh, code capture `preMoveCp` + `evaluation.bestMove` TRƯỚC nước đi, đợi Engine đạt depth ≥ 10 ở FEN SAU nước đi (qua stale gate) rồi tính Delta để classify. Dùng `isBookMove()` cho book detection thay vì heuristic.
 - **SVG Overlay**: Icon đánh giá (Best, Blunder...) được inject vào bàn cờ thông qua `customSquareStyles` sử dụng SVG Data URI, đặt ở góc `top right` của ô cờ.
-- **React-Chessboard Props**: Các tham số như `position`, `customArrows`, `customSquareStyles`, `onPieceDrop`, `onSquareClick`... phải nằm ở cấp cao nhất của prop (top-level) thay vì bao bọc bởi `options={{...}}` như một số phiên bản cũ hay cấu trúc tùy chỉnh, nếu không chức năng render UI (mũi tên, tô màu ô cờ) sẽ không hoạt động.
+- **React-Chessboard Props**: Các tham số như `position`, `customArrows`, `customSquareStyles`, `onPieceDrop`, `onSquareClick`... phải nằm ở cấp cao nhất của prop (top-level) thay vì bao bọc bởi `options={{...}}`.
+- **MoveListBranch**: Component đệ quy render cây nước đi. Mainline = grid, variations = inline nested. Dùng `isMainLine` prop để phân biệt.
+- **MoveExplanation**: Hiển thị giải thích tiếng Việt cho nước đi + nút "Rút lại và đi nước tốt nhất". Nút hiện khi `engineBestMove` có giá trị và classification thuộc `blunder|mistake|inaccuracy|good`. Callback `onPlayBestMove` thực hiện: `deleteNode()` → `setTimeout(50ms)` → `makeMove(bestMove)`.
+- **Opening Detection**: `utils/openings.ts` chứa database khai cuộc. `getOpeningName(sanSequence)` cho tên khai cuộc, `isBookMove(sanHistory)` cho phân loại book move chính xác (check prefix match).
+- **deleteNode**: Xóa node + toàn bộ subtree đệ quy. Loại khỏi parent.childrenIds hoặc rootNodeIds. Auto-navigate về parent nếu currentMoveId nằm trong subtree bị xóa.
 - **App.css**: File CSS template cũ, không ảnh hưởng UI hiện tại — có thể xóa
 - **`clsx` và `tailwind-merge`**: Đã install nhưng chưa sử dụng trong code hiện tại
 

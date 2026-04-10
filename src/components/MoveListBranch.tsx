@@ -7,19 +7,23 @@ interface Props {
   currentMoveId: string | null;
   goToMove: (id: string | null) => void;
   isMainLine?: boolean;
+  depth?: number;
 }
 
-export function MoveListBranch({ nodes, rootIds, currentMoveId, goToMove, isMainLine = true }: Props) {
-  if (rootIds.length === 0) return null;
+export function MoveListBranch({ nodes, rootIds, currentMoveId, goToMove, isMainLine = true, depth = 0 }: Props) {
+  if (rootIds.length === 0 || depth > 20) return null;
 
   // Flatten the primary branch path
   const branchPath: MoveNode[] = [];
   let currId: string | undefined = rootIds[0];
+  let safeCounter1 = 0;
   
-  while (currId && nodes[currId]) {
+  while (currId && nodes[currId] && safeCounter1 < 1000) {
     branchPath.push(nodes[currId]);
     currId = nodes[currId].childrenIds[0];
+    safeCounter1++;
   }
+  if (safeCounter1 >= 1000) console.error("Infinite loop detected in MoveListBranch flattening!");
 
   // Find variations (alternative children) at each step
   // and pair the branchPath into turns
@@ -69,6 +73,7 @@ export function MoveListBranch({ nodes, rootIds, currentMoveId, goToMove, isMain
                   currentMoveId={currentMoveId}
                   goToMove={goToMove}
                   isMainLine={false}
+                  depth={depth + 1}
                 />
               ))}
             </div>
