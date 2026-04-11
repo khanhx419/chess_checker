@@ -37,9 +37,11 @@ export function useEngine(fen: string, enabled: boolean = true) {
   fenRef.current = fen;
   // Use a ref to store intermediate multi-pv lines for the current depth to avoid flickering
   const topMovesRef = useRef<MoveDetail[]>([]);
-  // Gate to discard stale messages from previous analysis when FEN changes
-  const staleRef = useRef(false);
-  const gateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Monotonic sequence counter to discard stale messages from previous analysis.
+  // Much more reliable than setTimeout — immune to timing issues, GC pauses, etc.
+  const analysisIdRef = useRef(0);
+  // The ID that the current onmessage handler is listening for
+  const activeAnalysisIdRef = useRef(0);
 
   useEffect(() => {
     if (!enabled) return;
@@ -69,8 +71,9 @@ export function useEngine(fen: string, enabled: boolean = true) {
           const line = e.data;
           if (typeof line !== 'string') return;
 
-          // Discard stale messages from previous analysis
-          if (staleRef.current) return;
+          // Discard stale messages: if the analysis ID has moved on,
+          // this message belongs to a previous (now-obsolete) analysis.
+          if (activeAnalysisIdRef.current !== analysisIdRef.current) return;
 
           if (line.includes('info depth')) {
             const matchDepth = line.match(/depth (\d+)/);
@@ -129,9 +132,11 @@ export function useEngine(fen: string, enabled: boolean = true) {
         };
 
         // --- Start initial analysis ---
+        analysisIdRef.current++;
+        activeAnalysisIdRef.current = analysisIdRef.current;
         topMovesRef.current = [];
         worker.postMessage(`position fen ${fenRef.current}`);
-        worker.postMessage('go depth 16');
+        worker.postMessage('go depth 20');
       } catch (err) {
         console.error('Failed to initialise Stockfish worker:', err);
       }
@@ -140,7 +145,6 @@ export function useEngine(fen: string, enabled: boolean = true) {
     return () => {
       cancelled = true;
       readyRef.current = false;
-      if (gateTimerRef.current !== null) clearTimeout(gateTimerRef.current);
       if (workerRef.current) {
         workerRef.current.postMessage('quit');
         workerRef.current.terminate();
@@ -150,25 +154,24 @@ export function useEngine(fen: string, enabled: boolean = true) {
   }, []);
 
   // Re-analyse whenever the FEN changes.
-  // useLayoutEffect ensures the stale gate is set synchronously before
-  // any pending worker messages can be processed by the event loop.
+  // useLayoutEffect ensures the sequence counter is incremented synchronously
+  // before any pending worker messages can be processed by the event loop.
   useLayoutEffect(() => {
     if (workerRef.current && readyRef.current && enabled) {
-      // Gate stale messages from previous analysis.
-      // Without this, in-flight 'info depth' messages from the OLD position
-      // can update evaluation state AFTER the depth reset, causing the
-      // classification effect to fire with stale cp ≈ preMoveCp → delta ≈ 0 → "best".
-      staleRef.current = true;
-      if (gateTimerRef.current !== null) clearTimeout(gateTimerRef.current);
-      gateTimerRef.current = setTimeout(() => {
-        staleRef.current = false;
-      }, 10);
+      // Increment analysis sequence counter. Any in-flight messages from the
+      // OLD analysis will be discarded because their captured ID won't match.
+      analysisIdRef.current++;
 
-      setEvaluation(prev => ({ ...prev, depth: 0, bestMove: undefined }));
+      // Reset evaluation state for the new position
+      setEvaluation({ cp: undefined, mate: undefined, depth: 0, bestMove: undefined, topMoves: [] });
       topMovesRef.current = [];
       workerRef.current.postMessage('stop');
       workerRef.current.postMessage(`position fen ${fen}`);
-      workerRef.current.postMessage('go depth 16');
+      workerRef.current.postMessage('go depth 20');
+
+      // Mark the new analysis as active AFTER sending commands.
+      // The next onmessage call will see this updated ID and start accepting messages.
+      activeAnalysisIdRef.current = analysisIdRef.current;
     }
   }, [fen, enabled]);
 

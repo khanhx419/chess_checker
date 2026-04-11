@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { Chess, Move } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import { useGameStore } from './store';
-import { RefreshCw, ClipboardType, FlipVertical2 } from 'lucide-react';
+import { RefreshCw, ClipboardType, FlipVertical2, Lightbulb } from 'lucide-react';
 import { useEngine } from './useEngine';
 import { usePlayEngine } from './usePlayEngine';
 import { useGameReview } from './useGameReview';
@@ -32,6 +32,7 @@ function App() {
   const [isFlipped, setIsFlipped] = useState(false);
   const preMoveCpRef = useRef<number | null>(null);
   const [pendingClassId, setPendingClassId] = useState<string | null>(null);
+  const [showBestMoveArrow, setShowBestMoveArrow] = useState(false);
 
   const evaluation = useEngine(fen, mode === 'preview');
   function getMoveOptions(square: string) {
@@ -213,7 +214,7 @@ function App() {
     return false;
   }
 
-  // Real-time classification: wait for engine depth >= 10 on new position
+  // Real-time classification: wait for engine depth >= 12 on new position
   useEffect(() => {
     if (pendingClassId === null || mode !== 'preview') return;
     // If user navigated away from the pending move, cancel
@@ -221,8 +222,9 @@ function App() {
       setPendingClassId(null);
       return;
     }
-    // Wait for engine to reach sufficient depth on the NEW position
-    if (!evaluation.depth || evaluation.depth < 10) return;
+    // Wait for engine to reach sufficient depth on the NEW position.
+    // Depth 12 provides much more stable evaluations for classification.
+    if (!evaluation.depth || evaluation.depth < 12) return;
 
     const currentMoveNode = nodes[pendingClassId];
     if (!currentMoveNode) {
@@ -234,9 +236,23 @@ function App() {
     // Fall back to preMoveCpRef only if parent has no score yet (first move of game).
     const parentId = currentMoveNode.parentId;
     const parentNode = parentId ? nodes[parentId] : null;
-    const scoreBefore = parentNode?.score !== null && parentNode?.score !== undefined
-      ? parentNode.score
-      : (preMoveCpRef.current ?? 0);
+    const hasParentScore = parentNode?.score !== null && parentNode?.score !== undefined;
+    const hasPreMoveScore = preMoveCpRef.current !== null;
+
+    // CRITICAL: If BOTH scores are unavailable, we cannot classify reliably.
+    // Skip classification to avoid false "best" labels from delta ≈ 0.
+    if (!hasParentScore && !hasPreMoveScore) {
+      // Store the post-move score for future reference but don't classify
+      const scoreAfter = getIntegratedScore(evaluation);
+      updateNode(pendingClassId, { score: scoreAfter });
+      setPendingClassId(null);
+      preMoveCpRef.current = null;
+      return;
+    }
+
+    const scoreBefore = hasParentScore
+      ? parentNode!.score!
+      : preMoveCpRef.current!;
 
     const scoreAfter = getIntegratedScore(evaluation);
     const isWhiteMove = currentMoveNode.move.color === 'w';
@@ -321,6 +337,13 @@ function App() {
   const mergedSquareStyles = { ...classificationSquareStyles, ...optionSquares };
 
   const arrows: any[] = [...userArrows];
+
+  // Show best move arrow on the board when toggled on
+  if (showBestMoveArrow && mode === 'preview' && evaluation.bestMove && evaluation.bestMove.length >= 4) {
+    const from = evaluation.bestMove.substring(0, 2);
+    const to = evaluation.bestMove.substring(2, 4);
+    arrows.push({ startSquare: from, endSquare: to, color: 'rgba(50, 205, 50, 0.75)' });
+  }
 
   function handleLoadPgn() {
     if (loadPgn(pgnInput)) {
@@ -520,8 +543,8 @@ function App() {
               />
             </div>
           </div>
-          {/* Flip board button */}
-          <div className="w-full max-w-[650px] mt-2 flex justify-center">
+          {/* Board controls */}
+          <div className="w-full max-w-[650px] mt-2 flex justify-center gap-2">
             <button
               onClick={() => setIsFlipped(!isFlipped)}
               className="flex items-center gap-2 px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors text-sm font-medium border border-zinc-700 text-zinc-300"
@@ -529,6 +552,19 @@ function App() {
             >
               <FlipVertical2 size={16} /> Xoay bàn cờ
             </button>
+            {mode === 'preview' && (
+              <button
+                onClick={() => setShowBestMoveArrow(!showBestMoveArrow)}
+                className={`flex items-center gap-2 px-4 py-1.5 rounded-lg transition-colors text-sm font-medium border ${
+                  showBestMoveArrow 
+                    ? 'bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-300 border-emerald-500/50 shadow-[0_0_10px_rgba(16,185,129,0.15)]' 
+                    : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'
+                }`}
+                title={showBestMoveArrow ? 'Ẩn gợi ý' : 'Hiện nước đi tốt nhất'}
+              >
+                <Lightbulb size={16} /> {showBestMoveArrow ? 'Ẩn gợi ý' : 'Nước tốt nhất'}
+              </button>
+            )}
           </div>
         </div>
 
