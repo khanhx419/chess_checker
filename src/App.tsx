@@ -34,7 +34,40 @@ function App() {
   const [pendingClassId, setPendingClassId] = useState<string | null>(null);
   const [showBestMoveArrow, setShowBestMoveArrow] = useState(false);
 
-  const evaluation = useEngine(fen, mode === 'preview');
+  // --- Patch: Per-move engine analysis caching ---
+  const activeEvalNode = currentMoveId ? nodes[currentMoveId] : null;
+  const needsEngineAnalysis = (
+    mode === 'preview' &&
+    (!activeEvalNode || (activeEvalNode.score == null && (!activeEvalNode.engineBestMove)))
+  );
+  // This only runs the engine if needed for new/missing node
+  const liveEvaluation = useEngine(fen, needsEngineAnalysis);
+  // Use cached eval if present, otherwise use live eval
+  const evaluation = (activeEvalNode && activeEvalNode.score != null)
+    ? {
+        cp: typeof activeEvalNode.score === 'number' ? activeEvalNode.score : undefined,
+        mate: undefined,
+        bestMove: activeEvalNode.engineBestMove,
+        depth: 20,
+        topMoves: []
+      }
+    : liveEvaluation;
+  // Whenever engine gives eval, cache it to the store node
+  useEffect(() => {
+    if (
+      needsEngineAnalysis &&
+      currentMoveId &&
+      nodes[currentMoveId] &&
+      nodes[currentMoveId].score == null &&
+      (liveEvaluation.cp !== undefined || liveEvaluation.bestMove)
+    ) {
+      updateNode(currentMoveId, {
+        score: liveEvaluation.cp ?? null,
+        engineBestMove: liveEvaluation.bestMove,
+      });
+    }
+  }, [liveEvaluation, needsEngineAnalysis, currentMoveId, nodes, updateNode]);
+// --- End patch ---
   function getMoveOptions(square: string) {
     const moves = new Chess(fen).moves({
       square: square as import('chess.js').Square,
