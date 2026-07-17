@@ -43,15 +43,28 @@ function App() {
   // This only runs the engine if needed for new/missing node
   const liveEvaluation = useEngine(fen, needsEngineAnalysis);
   // Use cached eval if present, otherwise use live eval
-  const evaluation = (activeEvalNode && activeEvalNode.score != null)
+  // When at starting position (no currentMoveId) or uncached node,
+  // only trust liveEvaluation if depth > 0 (engine has started fresh analysis).
+  // This prevents showing stale evals from a previous position.
+  
+  // --- Patched logic for stable opening eval bar ---
+const evaluation = (activeEvalNode && activeEvalNode.score != null)
     ? {
         cp: typeof activeEvalNode.score === 'number' ? activeEvalNode.score : undefined,
         mate: undefined,
         bestMove: activeEvalNode.engineBestMove,
         depth: 20,
-        topMoves: []
+        topMoves: [] as import('./useEngine').MoveDetail[]
       }
-    : liveEvaluation;
+    : (liveEvaluation.depth && liveEvaluation.depth >= 10)
+      ? liveEvaluation
+      : {
+          cp: 30, // +0.3 as default stable opening value
+          mate: undefined,
+          bestMove: undefined,
+          depth: liveEvaluation.depth,
+          topMoves: [] as import('./useEngine').MoveDetail[],
+        };
   // Whenever engine gives eval, cache it to the store node
   useEffect(() => {
     if (

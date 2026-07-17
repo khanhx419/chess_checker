@@ -182,3 +182,40 @@
     border-right-color: var(--border);
   }
 }
+
+/*
+ * Protect chessboard pieces from Dark Mode browser extensions (Dark Reader, etc.)
+ * These extensions inject CSS variables and filters that invert SVG colors,
+ * making black pieces appear white. The pieces are inline SVGs inside
+ * [data-piece] containers (e.g. data-piece="bK", "wP").
+ */
+
+/* Block all filter/invert on pieces and board squares */
+[data-piece],
+[data-piece] *,
+[data-piece] svg,
+[data-piece] svg *,
+[data-square],
+[data-square] svg,
+[data-square] svg * {
+  filter: none !important;
+  -webkit-filter: none !important;
+}
+
+/* Reset all Dark Reader injected CSS custom properties */
+[data-piece],
+[data-piece] *,
+[data-square],
+[data-square] * {
+  --darkreader-inline-color: initial !important;
+  --darkreader-inline-fill: initial !important;
+  --darkreader-inline-stroke: initial !important;
+  --darkreader-inline-bgcolor: initial !important;
+  --darkreader-inline-outline: initial !important;
+  --darkreader-inline-border: initial !important;
+  --darkreader-inline-border-top: initial !important;
+  --darkreader-inline-border-right: initial !important;
+  --darkreader-inline-border-bottom: initial !important;
+  --darkreader-inline-border-left: initial !important;
+}
+
