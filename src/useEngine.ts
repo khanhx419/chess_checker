@@ -60,7 +60,7 @@ export function useEngine(fen: string, enabled: boolean = true) {
         await waitForMessage(worker, 'uciok');
         if (cancelled) return;
 
-        worker.postMessage('setoption name MultiPV value 3');
+        worker.postMessage('setoption name MultiPV value 1');
         worker.postMessage('isready');
         await waitForMessage(worker, 'readyok');
         if (cancelled) return;

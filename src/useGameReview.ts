@@ -4,7 +4,7 @@ import { isBookMove } from './utils/openings';
 export type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder' | 'brilliant' | 'book' | 'none';
 
 /** Maximum number of parallel Stockfish workers for game review. */
-const MAX_WORKERS = 2;
+const MAX_WORKERS = 4;
 
 /**
  * Wait for a specific response from the worker (e.g. "uciok", "readyok").
@@ -48,6 +48,7 @@ async function createEngine(): Promise<{
     return new Promise((resolve) => {
       let lastCp = 0;
       let lastMate: number | undefined = undefined;
+      let hasReceivedScore = false; // Track whether we ever got a real score line
 
       const handler = (e: MessageEvent) => {
         const line = e.data;
@@ -59,32 +60,49 @@ async function createEngine(): Promise<{
         if (matchMate) {
           lastMate = parseInt(matchMate[1], 10);
           lastCp = 0;
+          hasReceivedScore = true;
         } else if (matchCp) {
           lastCp = parseInt(matchCp[1], 10);
           lastMate = undefined;
+          hasReceivedScore = true;
         }
 
         if (line.startsWith('bestmove')) {
           const bestMoveMatch = line.match(/bestmove (\S+)/);
-          // Patch: If we hit a forced move with no score yet, request static eval.
-          if (!matchCp && !matchMate) {
+          worker.removeEventListener('message', handler);
+
+          // If Stockfish returned bestmove without ever sending a score
+          // (e.g. forced move / only 1 legal move), fall back to static eval.
+          if (!hasReceivedScore) {
             const staticEvalHandler = (e2: MessageEvent) => {
               const staticLine = e2.data;
               if (typeof staticLine !== 'string') return;
-              const staticCp = staticLine.match(/Final eval score: (-?\d+)/);
-              const staticMate = staticLine.match(/Final eval mate: (-?\d+)/);
-              worker.removeEventListener('message', staticEvalHandler);
-              resolve({
-                cp: staticCp ? parseInt(staticCp[1], 10) : 0,
-                mate: staticMate ? parseInt(staticMate[1], 10) : undefined,
-                bestMove: bestMoveMatch?.[1],
-              });
+              // Stockfish outputs: "Final evaluation       +0.35 (white side)"
+              const staticMatch = staticLine.match(/Final evaluation\s+([+-]?\d+\.?\d*)/);
+              if (staticMatch) {
+                worker.removeEventListener('message', staticEvalHandler);
+                const cpFromStatic = Math.round(parseFloat(staticMatch[1]) * 100);
+                resolve({
+                  cp: cpFromStatic,
+                  mate: undefined,
+                  bestMove: bestMoveMatch?.[1],
+                });
+              }
+              // Also handle "Total evaluation: none (in check)" or similar
+              if (staticLine.includes('Total evaluation') || staticLine.includes('Final evaluation')) {
+                worker.removeEventListener('message', staticEvalHandler);
+                resolve({
+                  cp: lastCp,
+                  mate: lastMate,
+                  bestMove: bestMoveMatch?.[1],
+                });
+              }
             };
             worker.addEventListener('message', staticEvalHandler);
-            worker.postMessage('eval'); // Stockfish static evaluation
+            worker.postMessage('eval');
             return;
           }
-          worker.removeEventListener('message', handler);
+
           resolve({ cp: lastCp, mate: lastMate, bestMove: bestMoveMatch?.[1] });
         }
       };

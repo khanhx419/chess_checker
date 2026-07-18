@@ -42,13 +42,14 @@ function App() {
   );
   // This only runs the engine if needed for new/missing node
   const liveEvaluation = useEngine(fen, needsEngineAnalysis);
-  // Use cached eval if present, otherwise use live eval
-  // When at starting position (no currentMoveId) or uncached node,
-  // only trust liveEvaluation if depth > 0 (engine has started fresh analysis).
-  // This prevents showing stale evals from a previous position.
-  
-  // --- Patched logic for stable opening eval bar ---
-const evaluation = (activeEvalNode && activeEvalNode.score != null)
+
+  // Use cached eval if present, otherwise use live eval.
+  // Only show the default +0.3 at the STARTING position (no moves played yet)
+  // to avoid the eval bar jumping to +0.3 every time a new move is played mid-game.
+  const isStartingPosition = currentMoveId === null;
+  const engineNotReady = !liveEvaluation.depth || liveEvaluation.depth === 0;
+
+  const evaluation = (activeEvalNode && activeEvalNode.score != null)
     ? {
         cp: typeof activeEvalNode.score === 'number' ? activeEvalNode.score : undefined,
         mate: undefined,
@@ -56,22 +57,21 @@ const evaluation = (activeEvalNode && activeEvalNode.score != null)
         depth: 20,
         topMoves: [] as import('./useEngine').MoveDetail[]
       }
-    : (liveEvaluation.depth && liveEvaluation.depth >= 10)
-      ? liveEvaluation
-      : {
-          cp: 30, // +0.3 as default stable opening value
-          mate: undefined,
-          bestMove: undefined,
-          depth: liveEvaluation.depth,
-          topMoves: [] as import('./useEngine').MoveDetail[],
-        };
-  // Whenever engine gives eval, cache it to the store node
+    : (isStartingPosition && engineNotReady)
+      ? { cp: 30, mate: undefined, bestMove: undefined, depth: 0, topMoves: [] as import('./useEngine').MoveDetail[] }
+      : liveEvaluation;
+
+  // Whenever engine gives eval, cache it to the store node.
+  // ONLY cache when the engine has finished computing (depth >= 20 or mate found).
+  // Caching too early (e.g. depth 1) causes the engine to be disabled prematurely,
+  // freezing the eval bar at an inaccurate value.
   useEffect(() => {
     if (
       needsEngineAnalysis &&
       currentMoveId &&
       nodes[currentMoveId] &&
       nodes[currentMoveId].score == null &&
+      (liveEvaluation.depth && liveEvaluation.depth >= 20 || liveEvaluation.mate !== undefined) &&
       (liveEvaluation.cp !== undefined || liveEvaluation.bestMove)
     ) {
       updateNode(currentMoveId, {
