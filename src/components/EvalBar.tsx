@@ -8,11 +8,9 @@ export function EvalBar({ evaluation }: EvalBarProps) {
   let whiteWinPercent = 50;
 
   if (evaluation.mate !== undefined) {
-    if (evaluation.mate > 0) whiteWinPercent = 100;
-    else if (evaluation.mate < 0) whiteWinPercent = 0;
-    else whiteWinPercent = 50;
+    whiteWinPercent = (evaluation.mateWinner === 'w' || (!evaluation.mateWinner && evaluation.mate > 0)) ? 100 : 0;
   } else if (evaluation.cp !== undefined) {
-    let cp = evaluation.cp;
+    const cp = evaluation.cp;
     // Logistic function: Win% = 50 + 50 * (2 / (1 + exp(-0.004 * cp)) - 1)
     whiteWinPercent = 50 + 50 * (2 / (1 + Math.exp(-0.004 * cp)) - 1);
   }
@@ -20,7 +18,7 @@ export function EvalBar({ evaluation }: EvalBarProps) {
   whiteWinPercent = Math.max(0, Math.min(100, whiteWinPercent));
 
   let scoreText = '';
-  if (evaluation.mate) {
+  if (evaluation.mate !== undefined) {
     scoreText = `M${Math.abs(evaluation.mate)}`;
   } else if (evaluation.cp !== undefined) {
     const cp = evaluation.cp / 100;
@@ -29,7 +27,7 @@ export function EvalBar({ evaluation }: EvalBarProps) {
   }
 
   return (
-    <div className="w-8 h-[600px] bg-zinc-800 rounded-lg overflow-hidden flex flex-col justify-end relative shadow-inner border border-zinc-700/50">
+    <div className="w-8 shrink-0 self-stretch bg-zinc-800 rounded-lg overflow-hidden flex flex-col justify-end relative shadow-inner border border-zinc-700/50">
       <div 
         className="w-full bg-slate-100 transition-all duration-300 ease-out flex justify-center"
         style={{ height: `${whiteWinPercent}%` }}

@@ -18,7 +18,7 @@ export function EvalGraph({ scores, currentIndex, onSelect }: EvalGraphProps) {
   // 0 -> 50%
   // -1500 -> 100%
   const getPoint = (score: number, index: number) => {
-    let cp = Math.max(-maxScore, Math.min(maxScore, score));
+    const cp = Math.max(-maxScore, Math.min(maxScore, score));
     // Dữ liệu scores này đôi khi mang số siêu bự if Mate (10000). Clamp nó lại.
     const yPercent = 50 - (cp / maxScore) * 50;
     const xPercent = (index / Math.max(1, scores.length - 1)) * 100;
@@ -68,7 +68,6 @@ export function EvalGraph({ scores, currentIndex, onSelect }: EvalGraphProps) {
           <div 
             key={i} 
             className="flex-1 h-full hover:bg-white/10 cursor-pointer"
-            onMouseEnter={() => onSelect(i)}
             onClick={() => onSelect(i)}
           />
         ))}

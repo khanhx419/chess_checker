@@ -4,9 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/sync-engine.mjs",
+    "predev": "node scripts/sync-engine.mjs",
+    "prebuild": "node scripts/sync-engine.mjs",
+    "pretest": "node scripts/sync-engine.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "node tests/regression.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -17,7 +22,7 @@
     "react": "^19.2.4",
     "react-chessboard": "^5.10.0",
     "react-dom": "^19.2.4",
-    "stockfish.js": "^10.0.2",
+    "stockfish": "19.0.1",
     "tailwind-merge": "^3.5.0",
     "zustand": "^5.0.12"
   },

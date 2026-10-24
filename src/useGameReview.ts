@@ -1,283 +1,122 @@
-import { useState, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useGameStore } from './store';
-import { isBookMove } from './utils/openings';
-export type Classification = 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder' | 'brilliant' | 'book' | 'none';
-
-/** Maximum number of parallel Stockfish workers for game review. */
-const MAX_WORKERS = 4;
-
-/**
- * Wait for a specific response from the worker (e.g. "uciok", "readyok").
- */
-function waitForMessage(worker: Worker, target: string): Promise<void> {
-  return new Promise((resolve) => {
-    const handler = (e: MessageEvent) => {
-      if (typeof e.data === 'string' && e.data.includes(target)) {
-        worker.removeEventListener('message', handler);
-        resolve();
-      }
-    };
-    worker.addEventListener('message', handler);
-  });
-}
-
-/** Result of evaluating a single FEN position. */
-interface EvalResult {
-  cp: number;
-  mate?: number;
-  bestMove?: string;
-}
-
-/**
- * Create and initialise a Stockfish worker with UCI handshake.
- * Returns a ready-to-use worker + an evaluateFen helper bound to it.
- */
-async function createEngine(): Promise<{
-  worker: Worker;
-  evaluateFen: (fen: string, depth?: number) => Promise<EvalResult>;
-}> {
-  const worker = new Worker('/stockfish/stockfish.js');
-
-  // UCI handshake
-  worker.postMessage('uci');
-  await waitForMessage(worker, 'uciok');
-  worker.postMessage('isready');
-  await waitForMessage(worker, 'readyok');
-
-  const evaluateFen = (fen: string, depth = 16): Promise<EvalResult> => {
-    return new Promise((resolve) => {
-      let lastCp = 0;
-      let lastMate: number | undefined = undefined;
-      let hasReceivedScore = false; // Track whether we ever got a real score line
-
-      const handler = (e: MessageEvent) => {
-        const line = e.data;
-        if (typeof line !== 'string') return;
-
-        const matchCp = line.match(/score cp (-?\d+)/);
-        const matchMate = line.match(/score mate (-?\d+)/);
-
-        if (matchMate) {
-          lastMate = parseInt(matchMate[1], 10);
-          lastCp = 0;
-          hasReceivedScore = true;
-        } else if (matchCp) {
-          lastCp = parseInt(matchCp[1], 10);
-          lastMate = undefined;
-          hasReceivedScore = true;
-        }
-
-        if (line.startsWith('bestmove')) {
-          const bestMoveMatch = line.match(/bestmove (\S+)/);
-          worker.removeEventListener('message', handler);
-
-          // If Stockfish returned bestmove without ever sending a score
-          // (e.g. forced move / only 1 legal move), fall back to static eval.
-          if (!hasReceivedScore) {
-            const staticEvalHandler = (e2: MessageEvent) => {
-              const staticLine = e2.data;
-              if (typeof staticLine !== 'string') return;
-              // Stockfish outputs: "Final evaluation       +0.35 (white side)"
-              const staticMatch = staticLine.match(/Final evaluation\s+([+-]?\d+\.?\d*)/);
-              if (staticMatch) {
-                worker.removeEventListener('message', staticEvalHandler);
-                const cpFromStatic = Math.round(parseFloat(staticMatch[1]) * 100);
-                resolve({
-                  cp: cpFromStatic,
-                  mate: undefined,
-                  bestMove: bestMoveMatch?.[1],
-                });
-              }
-              // Also handle "Total evaluation: none (in check)" or similar
-              if (staticLine.includes('Total evaluation') || staticLine.includes('Final evaluation')) {
-                worker.removeEventListener('message', staticEvalHandler);
-                resolve({
-                  cp: lastCp,
-                  mate: lastMate,
-                  bestMove: bestMoveMatch?.[1],
-                });
-              }
-            };
-            worker.addEventListener('message', staticEvalHandler);
-            worker.postMessage('eval');
-            return;
-          }
-
-          resolve({ cp: lastCp, mate: lastMate, bestMove: bestMoveMatch?.[1] });
-        }
-      };
-      worker.addEventListener('message', handler);
-      worker.postMessage(`position fen ${fen}`);
-      worker.postMessage(`go depth ${depth}`);
-    });
-  };
-
-  return { worker, evaluateFen };
-}
-
-/** Normalize evaluation score to White's perspective. */
-function getWhiteScore(fen: string, evalResult: { cp: number; mate?: number }): number {
-  const isBlackToMove = fen.includes(' b ');
-  if (evalResult.mate !== undefined) {
-    const mateIn = evalResult.mate;
-    return isBlackToMove ? -mateIn * 10000 : mateIn * 10000;
-  }
-  return isBlackToMove ? -evalResult.cp : evalResult.cp;
-}
+import { analyzedNode, isKnownOpening } from './analysis';
+import { analyzeMove, cacheMoveAnalysis, QUICK_SEARCH } from './moveAnalysis';
+import { cacheEvaluation, clearCachedEvaluations, createEngine, errorMessage, evaluationScore, isAbortError } from './engine';
+import type { EngineEval, UciEngine } from './engine';
 
 export function useGameReview() {
-  const { getActiveLine, updateNode } = useGameStore();
   const [isReviewing, setIsReviewing] = useState(false);
   const [progress, setProgress] = useState(0);
-  const workersRef = useRef<Worker[]>([]);
-
-  const startReview = useCallback(async () => {
-    let line = getActiveLine();
-    if (line.length === 0) {
-      // Patch: If at initial position, review the main line (root)
-      // Try to find the main/root line from the store
-      try {
-        // This assumes useGameStore exposes rootNodeIds and nodes
-        // @ts-ignore
-        const { rootNodeIds, nodes } = require('./store').useGameStore.getState();
-        line = rootNodeIds.map((id: string) => nodes[id]).filter(Boolean);
-      } catch {}
-      if (line.length === 0) return;
-    }
-    setIsReviewing(true);
-    setProgress(0);
-
-    // Clear existing scores for this line
-    line.forEach(node => {
-      updateNode(node.id, { classification: 'none', score: null, engineBestMove: undefined });
-    });
-
-    // Terminate any existing workers
-    workersRef.current.forEach(w => w.terminate());
-    workersRef.current = [];
-
-    // ---------------------------------------------------------------
-    // Phase 1: Collect all unique FENs that need evaluation.
-    //   For N moves we need: beforeFen(0), afterFen(0)==beforeFen(1),
-    //   afterFen(1)==beforeFen(2), ..., afterFen(N-1).
-    //   With caching this is N+1 unique FENs instead of 2N.
-    // ---------------------------------------------------------------
-    const uniqueFens: string[] = [];
-    const fenIndexMap = new Map<string, number>(); // fen -> index in uniqueFens
-
-    for (let i = 0; i < line.length; i++) {
-      const beforeFen = line[i].move.before;
-      const afterFen = line[i].move.after;
-
-      if (!fenIndexMap.has(beforeFen)) {
-        fenIndexMap.set(beforeFen, uniqueFens.length);
-        uniqueFens.push(beforeFen);
-      }
-      if (!fenIndexMap.has(afterFen)) {
-        fenIndexMap.set(afterFen, uniqueFens.length);
-        uniqueFens.push(afterFen);
-      }
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 2: Evaluate all unique FENs in parallel using a worker pool.
-    // ---------------------------------------------------------------
-    const numWorkers = Math.min(MAX_WORKERS, uniqueFens.length);
-    const engines: Awaited<ReturnType<typeof createEngine>>[] = [];
-
-    for (let w = 0; w < numWorkers; w++) {
-      engines.push(await createEngine());
-    }
-    workersRef.current = engines.map(e => e.worker);
-
-    const evalResults: EvalResult[] = new Array(uniqueFens.length);
-    let nextIdx = 0;
-    let completedCount = 0;
-
-    // Each worker pulls the next FEN from the shared queue when idle
-    const runWorker = async (engineIdx: number) => {
-      const engine = engines[engineIdx];
-      while (true) {
-        const idx = nextIdx++;
-        if (idx >= uniqueFens.length) break;
-
-        evalResults[idx] = await engine.evaluateFen(uniqueFens[idx], 12);
-        completedCount++;
-
-        // Update progress: FEN evaluation is ~70% of the work, classification is ~30%
-        setProgress(Math.round((completedCount / uniqueFens.length) * 70));
-      }
-    };
-
-    // Launch all workers concurrently
-    await Promise.all(
-      engines.map((_, idx) => runWorker(idx))
-    );
-
-    // ---------------------------------------------------------------
-    // Phase 3: Classify each move using the cached evaluation results.
-    // ---------------------------------------------------------------
-    const sanHistory: string[] = [];
-
-    for (let i = 0; i < line.length; i++) {
-      const node = line[i];
-      const move = node.move;
-      const beforeFen = move.before;
-      const afterFen = move.after;
-
-      sanHistory.push(move.san);
-
-      const evalBefore = evalResults[fenIndexMap.get(beforeFen)!];
-      const evalAfter = evalResults[fenIndexMap.get(afterFen)!];
-
-      const scoreBefore = getWhiteScore(beforeFen, evalBefore);
-      const scoreAfter = getWhiteScore(afterFen, evalAfter);
-
-      // Check if this move sequence is a known book move
-      if (isBookMove(sanHistory)) {
-        updateNode(node.id, { classification: 'book', score: scoreAfter, engineBestMove: evalBefore.bestMove });
-        setProgress(70 + Math.round(((i + 1) / line.length) * 30));
-        continue;
-      }
-
-      const isWhiteMove = move.color === 'w';
-      const delta = isWhiteMove ? (scoreAfter - scoreBefore) : (scoreBefore - scoreAfter);
-
-      let cls: Classification = 'none';
-
-      if (Math.abs(delta) > 5000) {
-        cls = delta < 0 ? 'blunder' : 'best';
-      } else {
-        if (delta > -20) cls = 'best';
-        else if (delta > -50) cls = 'excellent';
-        else if (delta > -100) cls = 'good';
-        else if (delta > -200) cls = 'inaccuracy';
-        else if (delta > -300) cls = 'mistake';
-        else cls = 'blunder';
-      }
-
-      updateNode(node.id, { classification: cls, score: scoreAfter, engineBestMove: evalBefore.bestMove });
-      setProgress(70 + Math.round(((i + 1) / line.length) * 30));
-    }
-
-    // Cleanup workers
-    engines.forEach(e => {
-      e.worker.postMessage('quit');
-      e.worker.terminate();
-    });
-    workersRef.current = [];
-
-    setIsReviewing(false);
-
-  }, [getActiveLine, updateNode]);
+  const [error, setError] = useState<{ message: string; gameVersion: number } | null>(null);
+  const runRef = useRef<AbortController | null>(null);
+  const { gameVersion, mode } = useGameStore();
 
   const cancelReview = useCallback(() => {
-    workersRef.current.forEach(w => {
-      w.terminate();
-    });
-    workersRef.current = [];
+    runRef.current?.abort();
+    runRef.current = null;
     setIsReviewing(false);
   }, []);
 
-  return { startReview, cancelReview, isReviewing, progress };
+  useEffect(() => cancelReview, [gameVersion, mode, cancelReview]);
+
+  const startReview = useCallback(async () => {
+    if (runRef.current) return;
+    const state = useGameStore.getState();
+    const line = state.getSelectedLine();
+    if (!line.length || state.mode !== 'preview') return;
+    const controller = new AbortController();
+    runRef.current = controller;
+    setIsReviewing(true);
+    setProgress(0);
+    setError(null);
+    const fens = [...new Set(line.flatMap(node => [node.move.before, node.move.after]))];
+    // Full Review means a fresh calculation, including positions already cached.
+    // Clear old labels immediately so a stale mistake cannot look like a new verdict.
+    clearCachedEvaluations(fens);
+    state.updateNodes(Object.fromEntries(line.map(node => [node.id, {
+      classification: 'none', score: null, scoreBefore: undefined, engineBestMove: undefined,
+      pvLine: undefined, positionEvaluation: undefined, beforeEvaluation: undefined,
+      moveEvaluation: undefined, alternativeEvaluation: undefined, moveLossCp: undefined, reviewDepth: undefined, analysisStatus: 'reviewing',
+    }])));
+    const engines: UciEngine[] = [];
+    const stop = () => engines.forEach(engine => engine.dispose());
+    controller.signal.addEventListener('abort', stop, { once: true });
+    const stillCurrent = () => !controller.signal.aborted && runRef.current === controller &&
+      useGameStore.getState().gameVersion === state.gameVersion && useGameStore.getState().mode === 'preview';
+    try {
+      const fresh = new Map<string, EngineEval>();
+      const count = Math.min(state.engineProfile === 'full' ? 1 : 2, Math.max(1, (navigator.hardwareConcurrency || 2) - 1), fens.length);
+      await Promise.all(Array.from({ length: count }, async () => {
+        const engine = await createEngine(controller.signal, state.engineProfile);
+        if (controller.signal.aborted) { engine.dispose(); return; }
+        engines.push(engine);
+      }));
+      let next = 0;
+      let completed = 0;
+      await Promise.all(engines.map(async engine => {
+        while (stillCurrent()) {
+          const fen = fens[next++];
+          if (!fen) break;
+          const result = await engine.analyze(fen, { ...QUICK_SEARCH, signal: controller.signal });
+          controller.signal.throwIfAborted();
+          fresh.set(fen, result);
+          cacheEvaluation(result);
+          // Update the bar as fresh positions finish, without premature labels.
+          const updates: Parameters<typeof state.updateNodes>[0] = {};
+          for (const node of line) {
+            if (node.move.after === fen && useGameStore.getState().nodes[node.id]?.move === node.move) {
+              updates[node.id] = { score: evaluationScore(result), positionEvaluation: result };
+            }
+          }
+          if (!stillCurrent()) break;
+          state.updateNodes(updates);
+          setProgress(Math.round(++completed / fens.length * 55));
+        }
+      }));
+      controller.signal.throwIfAborted();
+      next = 0;
+      completed = 0;
+      const histories = line.map((_, index) => line.slice(0, index + 1).map(node => node.move.san));
+      await Promise.all(engines.map(async engine => {
+        while (stillCurrent()) {
+          const index = next++;
+          const node = line[index];
+          if (!node) break;
+          const computed = await analyzeMove(engine, fresh.get(node.move.before)!, fresh.get(node.move.after)!,
+            node.move.lan, controller.signal, isKnownOpening(node, histories[index]));
+          controller.signal.throwIfAborted();
+          if (!stillCurrent()) break;
+          const result = cacheMoveAnalysis(computed);
+          // A book move may skip the restricted search and use its actual after FEN.
+          const played = result.played.fen === node.move.before ? result.played : undefined;
+          if (useGameStore.getState().nodes[node.id]?.move === node.move) {
+            state.updateNode(node.id, { ...analyzedNode(node, result.before, result.after, histories[index], played, result.alternative),
+              ...(result.uncertain ? { classification: 'uncertain', analysisStatus: 'uncertain' } : { analysisStatus: result.status }) });
+          }
+          setProgress(55 + Math.round(++completed / line.length * 45));
+        }
+      }));
+    } catch (error) {
+      if (!controller.signal.aborted && !isAbortError(error)) setError({ message: errorMessage(error), gameVersion: state.gameVersion });
+    } finally {
+      controller.abort();
+      const canClear = !runRef.current || runRef.current === controller;
+      if (runRef.current === controller) {
+        runRef.current = null;
+        setIsReviewing(false);
+      }
+      // Unfinished moves stay unclassified when a review is cancelled or fails.
+      if (canClear && useGameStore.getState().gameVersion === state.gameVersion) {
+        const unfinished: Parameters<typeof state.updateNodes>[0] = {};
+        for (const node of line) {
+          if (useGameStore.getState().nodes[node.id]?.analysisStatus === 'reviewing') unfinished[node.id] = { analysisStatus: undefined };
+        }
+        state.updateNodes(unfinished);
+      }
+    }
+  }, []);
+
+  return { startReview, cancelReview, isReviewing, progress,
+    error: mode === 'preview' && error?.gameVersion === gameVersion ? error.message : null };
 }

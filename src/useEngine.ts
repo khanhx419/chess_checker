@@ -1,179 +1,75 @@
-import { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { cacheEvaluation, createEngine, ENGINE_PROFILES, errorMessage, getCachedEvaluation, isAbortError } from './engine';
+import { useGameStore } from './store';
+import { analyzeMove, cacheMoveAnalysis, QUICK_SEARCH } from './moveAnalysis';
+import type { MoveAnalysis } from './moveAnalysis';
+import type { EngineEval, UciEngine } from './engine';
+export type { EngineEval } from './engine';
 
-export interface MoveDetail {
-  bestMove: string;
-  cp?: number;
-  mate?: number;
-}
+type LiveEvaluation = EngineEval & { moveReview?: MoveAnalysis };
 
-export interface EngineEval {
-  cp?: number;
-  mate?: number;
-  bestMove?: string;
-  depth?: number;
-  topMoves?: MoveDetail[];
-}
+export function useEngine(fen: string, enabled = true, retryKey = 0, beforeFen?: string, playedUci?: string, book = false) {
+  const [evaluation, setEvaluation] = useState<LiveEvaluation>({ fen, depth: 0, finished: false });
+  const engineRef = useRef<Promise<UciEngine> | null>(null);
+  const lifetime = useRef<AbortController | null>(null);
+  const profile = useGameStore(state => state.engineProfile);
+  const engineId = ENGINE_PROFILES[profile].id;
 
-/**
- * Wait for a specific response from the worker (e.g. "uciok", "readyok").
- */
-function waitForMessage(worker: Worker, target: string): Promise<void> {
-  return new Promise((resolve) => {
-    const handler = (e: MessageEvent) => {
-      if (typeof e.data === 'string' && e.data.includes(target)) {
-        worker.removeEventListener('message', handler);
-        resolve();
-      }
+  useEffect(() => {
+    lifetime.current = new AbortController();
+    return () => {
+      lifetime.current?.abort();
+      const engine = engineRef.current;
+      engineRef.current = null;
+      if (engine) void engine.then(worker => worker.dispose()).catch(() => {});
     };
-    worker.addEventListener('message', handler);
-  });
-}
-
-export function useEngine(fen: string, enabled: boolean = true) {
-  const [evaluation, setEvaluation] = useState<EngineEval>({ cp: 0, depth: 0, topMoves: [] });
-  const workerRef = useRef<Worker | null>(null);
-  const readyRef = useRef(false); // Engine fully handshaked & ready
-  const fenRef = useRef(fen);
-  fenRef.current = fen;
-  // Use a ref to store intermediate multi-pv lines for the current depth to avoid flickering
-  const topMovesRef = useRef<MoveDetail[]>([]);
-  // Monotonic sequence counter to discard stale messages from previous analysis.
-  // Much more reliable than setTimeout — immune to timing issues, GC pauses, etc.
-  const analysisIdRef = useRef(0);
-  // The ID that the current onmessage handler is listening for
-  const activeAnalysisIdRef = useRef(0);
+  }, [profile]);
 
   useEffect(() => {
     if (!enabled) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const worker = new Worker('/stockfish/stockfish.js');
-        if (cancelled) { worker.terminate(); return; }
-        workerRef.current = worker;
-
-        worker.onerror = (e) => console.error("Stockfish Worker error:", e);
-
-        // --- UCI Handshake ---
-        worker.postMessage('uci');
-        await waitForMessage(worker, 'uciok');
-        if (cancelled) return;
-
-        worker.postMessage('setoption name MultiPV value 1');
-        worker.postMessage('isready');
-        await waitForMessage(worker, 'readyok');
-        if (cancelled) return;
-
-        readyRef.current = true;
-
-        worker.onmessage = (e) => {
-          const line = e.data;
-          if (typeof line !== 'string') return;
-
-          // Discard stale messages: if the analysis ID has moved on,
-          // this message belongs to a previous (now-obsolete) analysis.
-          if (activeAnalysisIdRef.current !== analysisIdRef.current) return;
-
-          if (line.includes('info depth')) {
-            const matchDepth = line.match(/depth (\d+)/);
-            const matchCp    = line.match(/score cp (-?\d+)/);
-            const matchMate  = line.match(/score mate (-?\d+)/);
-            const matchPv    = line.match(/pv (\S+)/);
-            const matchMultiPv = line.match(/multipv (\d+)/);
-
-            const depth    = matchDepth ? parseInt(matchDepth[1], 10) : undefined;
-            const bestMove = matchPv ? matchPv[1] : undefined;
-            const multiPvIndex = matchMultiPv ? parseInt(matchMultiPv[1], 10) : 1;
-
-            let moveDetails: MoveDetail = { bestMove: bestMove ?? '' };
-            const isBlackToMove = fenRef.current.includes(' b ');
-            
-            if (matchMate) {
-              let mateValue = parseInt(matchMate[1], 10);
-              if (isBlackToMove) mateValue = -mateValue;
-              moveDetails.mate = mateValue;
-            } else if (matchCp) {
-              let cpValue = parseInt(matchCp[1], 10);
-              if (isBlackToMove) cpValue = -cpValue;
-              moveDetails.cp = cpValue;
-            }
-
-            if (bestMove) {
-              // Ensure array has enough capacity
-              while (topMovesRef.current.length < multiPvIndex) {
-                 topMovesRef.current.push({ bestMove: '' });
-              }
-              topMovesRef.current[multiPvIndex - 1] = moveDetails;
-            }
-
-            // Only update main evaluation when analyzing the primary line (multipv 1)
-            if (multiPvIndex === 1) {
-              setEvaluation(prev => {
-                const nextCp = moveDetails.cp !== undefined ? moveDetails.cp : (moveDetails.mate !== undefined ? undefined : prev.cp);
-                const nextMate = moveDetails.mate !== undefined ? moveDetails.mate : (moveDetails.cp !== undefined ? undefined : prev.mate);
-                return {
-                  ...prev,
-                  cp: nextCp,
-                  mate: nextMate,
-                  bestMove: bestMove ?? prev.bestMove,
-                  depth: depth ?? prev.depth,
-                  topMoves: [...topMovesRef.current].filter((m) => m && m.bestMove),
-                };
-              });
-            } else {
-               // Just update topMoves array if it's a secondary line
-               setEvaluation(prev => ({
-                 ...prev,
-                 topMoves: [...topMovesRef.current].filter((m) => m && m.bestMove),
-               }));
-            }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          let after = getCachedEvaluation(fen);
+          engineRef.current ??= createEngine(lifetime.current?.signal, profile);
+          const engine = await engineRef.current;
+          if (controller.signal.aborted) return;
+          if (!after) {
+            after = await engine.analyze(fen, {
+              ...QUICK_SEARCH, signal: controller.signal,
+              onInfo: info => { if (!controller.signal.aborted) setEvaluation(info); },
+            });
+            if (controller.signal.aborted) return;
+            cacheEvaluation(after);
+            setEvaluation(after);
           }
-        };
+          if (beforeFen && playedUci) {
+            const before = getCachedEvaluation(beforeFen) ?? await engine.analyze(beforeFen, { ...QUICK_SEARCH, signal: controller.signal });
+            controller.signal.throwIfAborted();
+            const result = await analyzeMove(engine, before, after, playedUci, controller.signal, book);
+            controller.signal.throwIfAborted();
+            const moveReview = cacheMoveAnalysis(result);
+            setEvaluation({ ...moveReview.after, moveReview });
+          } else if (!controller.signal.aborted) setEvaluation(after);
+        } catch (error) {
+          if (controller.signal.aborted || isAbortError(error)) return;
+          const failed = engineRef.current;
+          engineRef.current = null;
+          if (failed) void failed.then(engine => engine.dispose()).catch(() => {});
+          setEvaluation({ fen, engineId, depth: 0, finished: false, error: errorMessage(error) });
+        }
+      })();
+    }, 100);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [fen, enabled, retryKey, beforeFen, playedUci, book, profile, engineId]);
 
-        // --- Start initial analysis ---
-        analysisIdRef.current++;
-        activeAnalysisIdRef.current = analysisIdRef.current;
-        topMovesRef.current = [];
-        worker.postMessage(`position fen ${fenRef.current}`);
-        worker.postMessage('go depth 20');
-      } catch (err) {
-        console.error('Failed to initialise Stockfish worker:', err);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      readyRef.current = false;
-      if (workerRef.current) {
-        workerRef.current.postMessage('quit');
-        workerRef.current.terminate();
-        workerRef.current = null;
-      }
-    };
-  }, []);
-
-  // Re-analyse whenever the FEN changes.
-  // useLayoutEffect ensures the sequence counter is incremented synchronously
-  // before any pending worker messages can be processed by the event loop.
-  useLayoutEffect(() => {
-    if (workerRef.current && readyRef.current && enabled) {
-      // Increment analysis sequence counter. Any in-flight messages from the
-      // OLD analysis will be discarded because their captured ID won't match.
-      analysisIdRef.current++;
-
-      // Reset evaluation state for the new position
-      setEvaluation({ cp: undefined, mate: undefined, depth: 0, bestMove: undefined, topMoves: [] });
-      topMovesRef.current = [];
-      workerRef.current.postMessage('stop');
-      workerRef.current.postMessage(`position fen ${fen}`);
-      workerRef.current.postMessage('go depth 20');
-
-      // Mark the new analysis as active AFTER sending commands.
-      // The next onmessage call will see this updated ID and start accepting messages.
-      activeAnalysisIdRef.current = analysisIdRef.current;
-    }
-  }, [fen, enabled]);
-
-  return evaluation;
+  const current = evaluation.fen === fen && (!evaluation.engineId || evaluation.engineId === engineId) ? evaluation : undefined;
+  if (current?.error) return current;
+  const cached = getCachedEvaluation(fen);
+  // A forced review can replace or evict a result while this hook is idle.
+  // Do not resurrect that old finished result after cancellation or completion.
+  const selected = cached ?? (current?.finished ? undefined : current);
+  return { ...(selected ?? { fen, depth: 0, finished: false }),
+    moveReview: cached && current?.moveReview?.after === cached ? current.moveReview : undefined };
 }

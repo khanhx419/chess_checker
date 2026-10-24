@@ -1,188 +1,167 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { Chess, Move } from 'chess.js';
+import type { EngineEval } from '../engine';
+import { brilliantSacrifice } from '../brilliance';
+import type { BrilliantSacrifice } from '../brilliance';
 
 interface Props {
   classification: string;
   move: Move;
   engineBestMove?: string;
+  scoreBefore?: number;
+  scoreAfter?: number;
+  beforeEvaluation?: EngineEval;
+  positionEvaluation?: EngineEval;
+  moveEvaluation?: EngineEval;
+  alternativeEvaluation?: EngineEval;
+  moveLossCp?: number;
+  analysisStatus?: 'quick' | 'verified' | 'reviewing' | 'uncertain';
+  reviewDepth?: number;
+  pvLine?: string[];
   onPlayBestMove?: () => void;
 }
 
-const CLASSIFICATION_CONFIG: Record<string, { title: string; descFn: (san: string, player: string) => string; color: string; emoji: string }> = {
-  blunder: {
-    title: 'Nước đi lỗi (Blunder)',
-    descFn: (san, player) => `Nước đi ${san} của ${player} đánh mất hoàn toàn thế trận. Đây là một sai lầm nghiêm trọng!`,
-    color: 'border-red-500/30 bg-red-500/10 text-red-400',
-    emoji: '??',
-  },
-  mistake: {
-    title: 'Nước sai lầm (Mistake)',
-    descFn: (san, player) => `${san} là một nước đi không tốt, làm giảm cơ hội chiến thắng của ${player}.`,
-    color: 'border-orange-500/30 bg-orange-500/10 text-orange-400',
-    emoji: '?',
-  },
-  inaccuracy: {
-    title: 'Nước đi thiếu chính xác (Inaccuracy)',
-    descFn: (san) => `${san} tuy không phải lỗi nặng nhưng có những lựa chọn khác tối ưu hơn.`,
-    color: 'border-yellow-400/30 bg-yellow-400/10 text-yellow-400',
-    emoji: '?!',
-  },
-  good: {
-    title: 'Nước đi tốt (Good)',
-    descFn: (san) => `${san} là một nước đi ổn định và an toàn.`,
-    color: 'border-zinc-400/30 bg-zinc-400/10 text-zinc-300',
-    emoji: '',
-  },
-  excellent: {
-    title: 'Nước đi xuất sắc (Excellent)',
-    descFn: (san) => `${san} là một sự lựa chọn rất hay, gây sức ép đáng kể.`,
-    color: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-400',
-    emoji: '!',
-  },
-  best: {
-    title: 'Nước đi tốt nhất (Best)',
-    descFn: (san) => `${san} chính là ý tưởng hoàn hảo nhất trong tình huống này.`,
-    color: 'border-green-500/30 bg-green-500/10 text-green-400',
-    emoji: '★',
-  },
-  brilliant: {
-    title: 'Nước đi thiên tài (Brilliant)',
-    descFn: (san) => `Thật tuyệt vời! ${san} là một nước đi chiến thuật xuất sắc hiếm thấy.`,
-    color: 'border-teal-400/30 bg-teal-400/10 text-teal-400',
-    emoji: '!!',
-  },
-  book: {
-    title: 'Nước khai cuộc (Book)',
-    descFn: (san) => `${san} là nước đi chuẩn mực theo lý thuyết khai cuộc.`,
-    color: 'border-amber-500/30 bg-amber-500/10 text-amber-400',
-    emoji: '📖',
-  },
+const CLASSIFICATION_CONFIG: Record<string, { title: string; color: string; emoji: string }> = {
+  uncertain: { title: 'Chưa đủ chắc chắn', color: 'border-zinc-500/30 bg-zinc-500/10 text-zinc-300', emoji: '…' },
+  blunder: { title: 'Lỗi nghiêm trọng (Blunder)', color: 'border-red-500/30 bg-red-500/10 text-red-400', emoji: '??' },
+  mistake: { title: 'Sai lầm (Mistake)', color: 'border-orange-500/30 bg-orange-500/10 text-orange-400', emoji: '?' },
+  inaccuracy: { title: 'Thiếu chính xác (Inaccuracy)', color: 'border-yellow-400/30 bg-yellow-400/10 text-yellow-400', emoji: '?!' },
+  good: { title: 'Nước tốt (Good)', color: 'border-zinc-400/30 bg-zinc-400/10 text-zinc-300', emoji: '' },
+  excellent: { title: 'Nước rất tốt (Excellent)', color: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-400', emoji: '!' },
+  best: { title: 'Nước tốt nhất (Best)', color: 'border-green-500/30 bg-green-500/10 text-green-400', emoji: '★' },
+  brilliant: { title: 'Nước thiên tài (Brilliant)', color: 'border-teal-400/30 bg-teal-400/10 text-teal-400', emoji: '!!' },
+  book: { title: 'Nước khai cuộc (Book)', color: 'border-amber-500/30 bg-amber-500/10 text-amber-400', emoji: '📖' },
 };
 
-/** Classifications that are sub-optimal — user should see the best move option */
 const SUB_OPTIMAL = new Set(['blunder', 'mistake', 'inaccuracy', 'good']);
 
-/** Convert a UCI move string (e.g. "e2e4") to SAN (e.g. "e4") given a FEN */
 function uciToSan(uci: string, fen: string): string {
   try {
-    const tempChess = new Chess(fen);
-    const from = uci.substring(0, 2);
-    const to = uci.substring(2, 4);
-    const promotion = uci.length > 4 ? uci[4] : undefined;
-    const result = tempChess.move({ from, to, promotion });
-    return result ? result.san : uci;
-  } catch {
-    return uci;
+    return new Chess(fen).move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] })?.san ?? uci;
+  } catch { return uci; }
+}
+
+function pvToSanSequence(pvMoves: string[], startFen: string): string[] {
+  const sans: string[] = [];
+  const chess = new Chess(startFen);
+  try {
+    for (const uci of pvMoves.slice(0, 6)) {
+      sans.push(chess.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] }).san);
+    }
+  } catch { /* Keep only the legal prefix. */ }
+  return sans;
+}
+
+function formatScore(cp: number, evaluation?: EngineEval): string {
+  if (evaluation?.mate !== undefined) {
+    const whiteWins = evaluation.mateWinner ? evaluation.mateWinner === 'w' : evaluation.mate > 0;
+    return `${whiteWins ? '+' : '−'}M${Math.abs(evaluation.mate)}`;
+  }
+  if (Math.abs(cp) >= 10000) return cp > 0 ? '+M' : '−M';
+  return `${cp >= 0 ? '+' : ''}${(cp / 100).toFixed(2)}`;
+}
+
+function describeMove({ classification, move, beforeEvaluation, moveEvaluation, positionEvaluation }: Props, sacrifice?: BrilliantSacrifice): string {
+  if (classification === 'uncertain') return 'Kết quả chưa ổn định trong thời gian kiểm tra. Chưa gán nhãn tốt/xấu cho nước này.';
+  const candidate = moveEvaluation ?? positionEvaluation;
+  const side = move.color === 'w' ? 'w' : 'b';
+  const mateWinner = (evaluation?: EngineEval) => evaluation?.mate === undefined ? undefined :
+    evaluation.mateWinner ?? (evaluation.mate > 0 ? 'w' : 'b');
+  if (classification === 'book') return `${move.san} nằm trong danh sách khai cuộc của ứng dụng.`;
+  if (classification === 'brilliant' && sacrifice) {
+    const name = { n: 'Mã', b: 'Tượng', r: 'Xe', q: 'Hậu' }[sacrifice.piece];
+    return `${move.san} thí ${name} tại ${sacrifice.square} mà vẫn giữ kết quả gần nước tốt nhất. Biến máy tính bên dưới nhận quân thí. Nhãn thiên tài là quy tắc của ứng dụng, dựa trên điểm và biến Stockfish.`;
+  }
+  if (classification === 'best') return `${move.san} trùng nước ưu tiên của engine trong lượt phân tích này.`;
+  if (candidate?.mate !== undefined) {
+    return mateWinner(candidate) === side
+      ? `Với ${move.san}, engine vẫn tìm thấy chuỗi chiếu hết cho bên vừa đi.`
+      : `Sau ${move.san}, engine tìm thấy chuỗi chiếu hết cho đối phương. Nhãn đánh giá so sánh với lựa chọn trước nước đi.`;
+  }
+  if (mateWinner(beforeEvaluation) === side) {
+    return `Ở nhánh ưu tiên trước ${move.san}, engine tìm thấy chiếu hết; tìm kiếm nước đã đi chưa tìm lại được chuỗi đó.`;
+  }
+  switch (classification) {
+    case 'excellent': return `${move.san} có kết quả gần lựa chọn ưu tiên của engine trong lượt tìm kiếm này.`;
+    case 'good': return `${move.san} giảm một ít điểm đánh giá so với lựa chọn ưu tiên của engine.`;
+    case 'inaccuracy': return `${move.san} làm giảm điểm đánh giá của bên vừa đi so với lựa chọn ưu tiên.`;
+    case 'mistake': return `${move.san} làm giảm đáng kể điểm đánh giá của bên vừa đi.`;
+    case 'blunder': return `${move.san} có chênh lệch điểm đánh giá lớn so với lựa chọn ưu tiên của engine.`;
+    default: return `${move.san} — kết quả theo lượt phân tích hiện tại.`;
   }
 }
 
-export function MoveExplanation({ classification, move, engineBestMove, onPlayBestMove }: Props) {
-  const [showingBestMove, setShowingBestMove] = useState(false);
-
-  // Reset reveal state whenever the viewed move changes
-  useEffect(() => {
-    setShowingBestMove(false);
-  }, [move.san, move.before]);
-
-  if (classification === 'none' || !classification) return null;
-
+export function MoveExplanation(props: Props) {
+  const { classification, move, engineBestMove, scoreBefore, scoreAfter, beforeEvaluation,
+    positionEvaluation, moveEvaluation, alternativeEvaluation, moveLossCp, analysisStatus, reviewDepth, pvLine, onPlayBestMove } = props;
+  // Tie reveal state to the position so navigation does not reveal another node.
+  const [revealedPosition, setRevealedPosition] = useState<string | null>(null);
+  const showingBestMove = revealedPosition === move.after;
   const config = CLASSIFICATION_CONFIG[classification];
-  if (!config) return null;
-
-  const san = move.san;
-  const player = move.color === 'w' ? 'Trắng' : 'Đen';
-  const title = config.title;
-  const description = config.descFn(san, player);
-
-  const isSubOptimal = SUB_OPTIMAL.has(classification);
-  const canShowBestMove = isSubOptimal && !!engineBestMove;
-
-  // Convert UCI best move to human-readable SAN — memoize to avoid recalculating
-  const bestMoveSan = useMemo(() => {
-    if (!engineBestMove) return '';
-    return uciToSan(engineBestMove, move.before);
-  }, [engineBestMove, move.before]);
+  const bestMoveSan = useMemo(() => engineBestMove ? uciToSan(engineBestMove, move.before) : '', [engineBestMove, move.before]);
+  const pvSanSequence = useMemo(() => pvLine?.length ? pvToSanSequence(pvLine, move.before) : [], [pvLine, move.before]);
+  const sacrifice = useMemo(() => classification === 'brilliant' && beforeEvaluation && positionEvaluation
+    ? brilliantSacrifice(move, beforeEvaluation, positionEvaluation, moveEvaluation, alternativeEvaluation) : undefined,
+  [classification, move, beforeEvaluation, positionEvaluation, moveEvaluation, alternativeEvaluation]);
+  const sacrificeLine = useMemo(() => sacrifice ? pvToSanSequence(sacrifice.line, move.before) : [], [sacrifice, move.before]);
+  const played = `${move.from}${move.to}${move.promotion ?? ''}`;
+  const canShowBestMove = SUB_OPTIMAL.has(classification) && !!engineBestMove && played !== engineBestMove;
+  const comparableCp = beforeEvaluation?.mate === undefined && (moveEvaluation ?? positionEvaluation)?.mate === undefined;
+  const status = analysisStatus === 'uncertain' ? 'Cần kiểm tra thêm' : analysisStatus === 'verified' ? 'Đã kiểm tra lại' : analysisStatus === 'reviewing' ? 'Đang kiểm tra lại' : 'Phân tích nhanh';
+  if (!config || classification === 'none') return null;
 
   return (
-    <div
-      className={`p-4 rounded-lg border flex flex-col gap-2 transition-all ${config.color}`}
-      style={{ animation: 'moveExplFadeIn 0.25s ease-out' }}
-    >
-      <div className="flex items-center justify-between">
-        <h4 className="font-bold text-sm tracking-wide flex items-center gap-2">
+    <div className={`p-3 rounded-lg border flex flex-col gap-2 ${config.color}`}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="font-bold text-sm flex items-center gap-2">
           {config.emoji && <span className="text-xs opacity-70">{config.emoji}</span>}
-          {title}
+          {config.title}
         </h4>
-        {/* Sub-optimal moves: show "reveal best move" button top right */}
-        {canShowBestMove && !showingBestMove && (
-          <button
-            onClick={() => setShowingBestMove(true)}
-            className="ml-2 flex items-center gap-2 text-xs px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border border-emerald-500/30 rounded-lg font-semibold"
-            style={{ minWidth: 0 }}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="16" x2="12" y2="12" />
-              <line x1="12" y1="8" x2="12.01" y2="8" />
-            </svg>
-            Xem nước đi tốt nhất
-          </button>
-        )}
+        <span className="text-[10px] text-zinc-400">
+          {status}{reviewDepth !== undefined && reviewDepth > 0 ? ` · D${reviewDepth}` : ''}
+        </span>
       </div>
-      <p className="text-sm opacity-90">{description}</p>
-
-      {/* Revealed best move + undo button */}
+      <p className="text-xs opacity-90 leading-relaxed">{describeMove(props, sacrifice)}</p>
+      {sacrificeLine.length > 0 && (
+        <p className="text-xs text-teal-200/90">Biến nhận quân thí: <span className="font-mono">{sacrificeLine.join(' → ')}</span></p>
+      )}
+      {scoreAfter !== undefined && (
+        <div className="text-xs text-zinc-300">
+          <span className="text-zinc-500">Điểm Trắng (như thanh đánh giá): </span>
+          {scoreBefore !== undefined && <><span className="font-mono">{formatScore(scoreBefore, beforeEvaluation)}</span><span className="text-zinc-500"> → </span></>}
+          <span className="font-mono font-semibold">{formatScore(scoreAfter, positionEvaluation)}</span>
+        </div>
+      )}
+      {comparableCp && moveLossCp !== undefined && !['book', 'uncertain'].includes(classification) && (
+        <p className="text-[11px] text-zinc-400">
+          Chênh lệch so với nước ưu tiên: {(moveLossCp / 100).toFixed(2)} tốt.
+          {moveEvaluation ? ' So sánh hai nước từ cùng thế cờ.' : ' Kết quả nhanh từ hai thế cờ liên tiếp.'}
+        </p>
+      )}
+      {analysisStatus !== 'verified' && (
+        <p className="text-[10px] text-zinc-500">Full Review kiểm tra lại kết quả; nhãn có thể thay đổi khi engine tìm sâu hơn.</p>
+      )}
+      {canShowBestMove && !showingBestMove && (
+        <button onClick={() => setRevealedPosition(move.after)}
+          className="self-start text-xs px-2.5 py-1.5 rounded-md bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/30">
+          Xem nước đi tốt nhất
+        </button>
+      )}
       {canShowBestMove && showingBestMove && (
-        <div
-          className="flex flex-col gap-2.5 mt-1 p-3 rounded-lg border border-emerald-500/25 bg-emerald-950/30"
-          style={{ animation: 'moveExplSlideIn 0.2s ease-out' }}
-        >
-          <div className="flex items-center gap-2 text-sm font-semibold text-emerald-400">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="20 6 9 17 4 12" />
-            </svg>
-            <span>Nước tốt nhất:</span>
-            <span className="inline-flex items-center bg-emerald-500 text-zinc-950 px-2.5 py-0.5 rounded font-mono font-bold text-xs tracking-wider">
-              {bestMoveSan}
-            </span>
+        <div className="flex flex-col gap-2 p-2.5 rounded-lg border border-emerald-500/25 bg-emerald-950/30">
+          <div className="text-xs font-semibold text-emerald-400">
+            Nước máy ưu tiên: <span className="font-mono text-emerald-200">{bestMoveSan}</span>
           </div>
-
+          {pvSanSequence.length > 1 && (
+            <p className="text-xs text-zinc-400">Biến máy tính: <span className="font-mono text-emerald-300/80">{pvSanSequence.join(' → ')}</span></p>
+          )}
           {onPlayBestMove && (
-            <button
-              onClick={onPlayBestMove}
-              className="flex items-center justify-center gap-2 w-full py-2.5 px-4 rounded-lg text-sm font-bold transition-all
-                bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/40 hover:border-emerald-400/60
-                shadow-[0_0_12px_rgba(16,185,129,0.1)] hover:shadow-[0_0_20px_rgba(16,185,129,0.25)]
-                active:scale-[0.98] cursor-pointer"
-            >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="1 4 1 10 7 10" />
-                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-              </svg>
-              Rút lại và đi nước tốt nhất
+            <button onClick={onPlayBestMove} className="w-full py-2 rounded-md text-xs font-bold bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/40">
+              Thử nước tốt nhất
             </button>
           )}
         </div>
       )}
-
-      {/* Optimal moves: congratulatory message (best, excellent, brilliant) */}
-      {!isSubOptimal && ['best', 'brilliant'].includes(classification) && (
-        <p className="text-xs opacity-60 italic mt-1">
-          ✅ Bạn đã đi đúng nước tốt nhất!
-        </p>
-      )}
-
-      {/* Inline keyframe styles */}
-      <style>{`
-        @keyframes moveExplFadeIn {
-          from { opacity: 0; transform: translateY(6px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes moveExplSlideIn {
-          from { opacity: 0; transform: translateY(-4px); }
-          to   { opacity: 1; transform: translateY(0); }
-        }
-      `}</style>
     </div>
   );
 }

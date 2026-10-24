@@ -1,266 +1,213 @@
 import { create } from 'zustand';
-import { Chess, Move } from 'chess.js';
+import { Chess } from 'chess.js';
+import type { Move } from 'chess.js';
+import type { EngineEval } from './engine';
+import { getEngineProfile, setEngineProfile as configureEngine } from './engine';
+import type { EngineProfile } from './engine';
 
 export type AppMode = 'preview' | 'play';
 export type PlayerColor = 'w' | 'b';
 export type GameOverState = { winner: 'w' | 'b' | 'draw' | null; reason: string } | null;
 
 export interface MoveNode {
-  id: string; // generated UUID or unique string
+  id: string;
   move: Move;
   classification: string;
   score: number | null;
+  scoreBefore?: number | null;
   parentId: string | null;
   childrenIds: string[];
-  engineBestMove?: string; // UCI best move the engine suggested at this position
+  // Recommendation BEFORE the move, for explaining an alternative.
+  engineBestMove?: string;
+  pvLine?: string[];
+  // Evaluation AFTER the move, for the board and its next-move hint.
+  positionEvaluation?: EngineEval;
+  beforeEvaluation?: EngineEval;
+  moveEvaluation?: EngineEval;
+  alternativeEvaluation?: EngineEval;
+  moveLossCp?: number;
+  analysisStatus?: 'quick' | 'verified' | 'reviewing' | 'uncertain';
+  reviewDepth?: number;
 }
 
 interface GameState {
+  engineProfile: EngineProfile;
+  setEngineProfile: (profile: EngineProfile) => void;
   chess: Chess;
   fen: string;
+  initialFen: string;
+  gameVersion: number;
   nodes: Record<string, MoveNode>;
-  rootNodeIds: string[]; // typically just one, but supports multiple starting moves if needed
+  rootNodeIds: string[];
   currentMoveId: string | null;
+  preferredChildren: Record<string, string>;
   mode: AppMode;
   playerColor: PlayerColor;
   botElo: number;
   gameOver: GameOverState;
   updateNode: (id: string, data: Partial<MoveNode>) => void;
+  updateNodes: (updates: Record<string, Partial<MoveNode>>) => void;
   makeMove: (move: { from: string; to: string; promotion?: string }, engineBestMove?: string) => boolean;
   deleteNode: (id: string) => void;
   resetGame: (config?: { playerColor?: PlayerColor; botElo?: number }) => void;
   loadPgn: (pgn: string) => boolean;
   goToMove: (id: string | null) => void;
   getActiveLine: () => MoveNode[];
+  getSelectedLine: () => MoveNode[];
   setMode: (mode: AppMode) => void;
   setPlayerColor: (color: PlayerColor) => void;
   setBotElo: (elo: number) => void;
   setGameOver: (state: GameOverState) => void;
 }
 
+function ancestors(nodes: Record<string, MoveNode>, id: string | null) {
+  const line: MoveNode[] = [];
+  const visited = new Set<string>();
+  while (id && nodes[id] && !visited.has(id)) {
+    visited.add(id);
+    line.unshift(nodes[id]);
+    id = nodes[id].parentId;
+  }
+  return line;
+}
+
+function gameResult(chess: Chess): GameOverState {
+  if (chess.isCheckmate()) return { winner: chess.turn() === 'w' ? 'b' : 'w', reason: 'checkmate' };
+  if (!chess.isDraw()) return null;
+  const reason = chess.isStalemate() ? 'stalemate' : chess.isThreefoldRepetition() ? 'repetition' :
+    chess.isInsufficientMaterial() ? 'insufficient material' : '50-move rule';
+  return { winner: 'draw', reason };
+}
+
+function chessAt(state: Pick<GameState, 'initialFen' | 'nodes'>, id: string | null) {
+  const chess = new Chess(state.initialFen);
+  for (const node of ancestors(state.nodes, id)) {
+    chess.move({ from: node.move.from, to: node.move.to, promotion: node.move.promotion });
+  }
+  return chess;
+}
+
 export const useGameStore = create<GameState>((set, get) => ({
-  chess: new Chess(),
-  fen: new Chess().fen(),
-  nodes: {},
-  rootNodeIds: [],
-  currentMoveId: null,
-  mode: 'preview',
-  playerColor: 'w',
-  botElo: 1500,
-  gameOver: null,
-  updateNode: (id, data) => {
-    const { nodes } = get();
-    if (nodes[id]) {
-      set({ nodes: { ...nodes, [id]: { ...nodes[id], ...data } } });
-    }
+  engineProfile: getEngineProfile(),
+  setEngineProfile: profile => {
+    if (profile === get().engineProfile) return;
+    configureEngine(profile);
+    const nodes = Object.fromEntries(Object.entries(get().nodes).map(([id, node]) => [id, {
+      ...node, classification: 'none', score: null, scoreBefore: undefined, engineBestMove: undefined,
+      pvLine: undefined, positionEvaluation: undefined, beforeEvaluation: undefined, moveEvaluation: undefined, alternativeEvaluation: undefined,
+      moveLossCp: undefined, analysisStatus: undefined, reviewDepth: undefined,
+    }]));
+    set({ engineProfile: profile, nodes, gameVersion: get().gameVersion + 1 });
   },
-  getActiveLine: () => {
-    const { nodes, currentMoveId } = get();
-    const line: MoveNode[] = [];
-    let curr = currentMoveId;
-    let safeCounter = 0;
-    while (curr && nodes[curr] && safeCounter < 1000) {
-      line.unshift(nodes[curr]);
-      curr = nodes[curr].parentId;
-      safeCounter++;
+  chess: new Chess(), fen: new Chess().fen(), initialFen: new Chess().fen(), gameVersion: 0,
+  nodes: {}, rootNodeIds: [], currentMoveId: null, preferredChildren: {},
+  mode: 'preview', playerColor: 'w', botElo: 1500, gameOver: null,
+  updateNode: (id, data) => get().updateNodes({ [id]: data }),
+  updateNodes: updates => {
+    const nodes = { ...get().nodes };
+    let changed = false;
+    for (const [id, data] of Object.entries(updates)) {
+      if (nodes[id]) { nodes[id] = { ...nodes[id], ...data }; changed = true; }
     }
-    if (safeCounter >= 1000) console.error("Infinite loop detected in getActiveLine!");
+    if (changed) set({ nodes });
+  },
+  getActiveLine: () => ancestors(get().nodes, get().currentMoveId),
+  getSelectedLine: () => {
+    const { nodes, rootNodeIds, preferredChildren } = get();
+    const line = get().getActiveLine();
+    const visited = new Set(line.map(node => node.id));
+    let parent = line.at(-1);
+    while (true) {
+      const children = parent ? parent.childrenIds : rootNodeIds;
+      const preferred = preferredChildren[parent?.id ?? 'root'];
+      const id = children.includes(preferred) ? preferred : children[0];
+      if (!id || !nodes[id] || visited.has(id)) break;
+      parent = nodes[id];
+      line.push(parent);
+      visited.add(id);
+    }
     return line;
   },
-  setMode: (mode) => set({ mode }),
-  setPlayerColor: (playerColor) => set({ playerColor }),
-  setBotElo: (botElo) => set({ botElo }),
-  setGameOver: (gameOver) => set({ gameOver }),
-
-  deleteNode: (id) => {
-    const { nodes, rootNodeIds, currentMoveId } = get();
-    const newNodes = { ...nodes };
-    // Collect all descendant IDs to remove
-    const toRemove: string[] = [];
-    const collect = (nodeId: string) => {
-      toRemove.push(nodeId);
-      if (newNodes[nodeId]) {
-        newNodes[nodeId].childrenIds.forEach(collect);
-      }
-    };
-    collect(id);
-    // Remove from parent's childrenIds
-    const parentId = newNodes[id]?.parentId;
-    let newRootIds = [...rootNodeIds];
-    if (parentId && newNodes[parentId]) {
-      newNodes[parentId] = {
-        ...newNodes[parentId],
-        childrenIds: newNodes[parentId].childrenIds.filter(cid => cid !== id),
-      };
-    } else {
-      newRootIds = newRootIds.filter(rid => rid !== id);
+  setMode: mode => set({ mode }),
+  setPlayerColor: playerColor => set({ playerColor }),
+  setBotElo: botElo => set({ botElo }),
+  setGameOver: gameOver => set({ gameOver }),
+  deleteNode: id => {
+    const state = get();
+    if (!state.nodes[id]) return;
+    const nodes = { ...state.nodes };
+    const removed = new Set<string>();
+    const pending = [id];
+    while (pending.length) {
+      const next = pending.pop()!;
+      if (removed.has(next) || !nodes[next]) continue;
+      removed.add(next);
+      pending.push(...nodes[next].childrenIds);
     }
-    // Delete all collected nodes
-    toRemove.forEach(rid => delete newNodes[rid]);
-    // If current move was in the deleted subtree, navigate to parent
-    const needsNav = currentMoveId && toRemove.includes(currentMoveId);
-    if (needsNav) {
-      const navTo = parentId ?? null;
-      const newFen = navTo && newNodes[navTo] ? newNodes[navTo].move.after : new Chess().fen();
-      set({ nodes: newNodes, rootNodeIds: newRootIds, currentMoveId: navTo, fen: newFen });
-    } else {
-      set({ nodes: newNodes, rootNodeIds: newRootIds });
-    }
+    const parentId = nodes[id].parentId;
+    if (parentId) nodes[parentId] = { ...nodes[parentId], childrenIds: nodes[parentId].childrenIds.filter(child => child !== id) };
+    removed.forEach(child => delete nodes[child]);
+    const currentMoveId = state.currentMoveId && removed.has(state.currentMoveId) ? parentId : state.currentMoveId;
+    const preferredChildren = Object.fromEntries(Object.entries(state.preferredChildren).filter(([parent, child]) => !removed.has(parent) && !removed.has(child)));
+    const chess = chessAt({ initialFen: state.initialFen, nodes }, currentMoveId);
+    set({ nodes, rootNodeIds: state.rootNodeIds.filter(root => root !== id), currentMoveId, preferredChildren,
+      chess, fen: chess.fen(), gameOver: gameResult(chess) });
   },
-
   makeMove: (move, engineBestMove) => {
-    const { currentMoveId, nodes, rootNodeIds } = get();
+    const state = get();
     try {
-      let tempChess = new Chess();
-      if (currentMoveId && nodes[currentMoveId]) {
-        tempChess.load(nodes[currentMoveId].move.after);
-      }
-
-      const result = tempChess.move(move);
-      if (result) {
-        // Evaluate if this move already exists in children
-        let existingChildId: string | null = null;
-        let parentNode = currentMoveId ? nodes[currentMoveId] : null;
-        const childrenToCheck = parentNode ? parentNode.childrenIds : rootNodeIds;
-
-        for (const childId of childrenToCheck) {
-          if (nodes[childId].move.san === result.san) {
-            existingChildId = childId;
-            break;
-          }
-        }
-
-        let newGameOver: GameOverState = null;
-        if (tempChess.isCheckmate()) {
-          newGameOver = { winner: tempChess.turn() === 'w' ? 'b' : 'w', reason: 'checkmate' };
-        } else if (tempChess.isDraw()) {
-          let reason = 'draw';
-          if (tempChess.isStalemate()) reason = 'stalemate';
-          else if (tempChess.isThreefoldRepetition()) reason = 'repetition';
-          else if (tempChess.isInsufficientMaterial()) reason = 'insufficient material';
-          else reason = '50-move rule';
-          newGameOver = { winner: 'draw', reason };
-        }
-
-        if (existingChildId) {
-          // Move already exists, just navigate to it
-          // Wait, making a main line move creates a forward step. It might be a variation.
-          // In mode = play, we might want to update game over.
-          set({
-            chess: tempChess,
-            fen: tempChess.fen(),
-            currentMoveId: existingChildId,
-            gameOver: newGameOver,
-          });
-          return true;
-        }
-
-        // Create new node
-        const newNodeId = Math.random().toString(36).substring(2, 10);
-        const newNode: MoveNode = {
-          id: newNodeId,
-          move: result,
-          classification: 'none',
-          score: null,
-          parentId: currentMoveId,
-          childrenIds: [],
-          engineBestMove: engineBestMove,
-        };
-
-        const newNodes = { ...nodes, [newNodeId]: newNode };
-        let newRootIds = [...rootNodeIds];
-
-        if (currentMoveId && newNodes[currentMoveId]) {
-          newNodes[currentMoveId] = {
-            ...newNodes[currentMoveId],
-            childrenIds: [...newNodes[currentMoveId].childrenIds, newNodeId],
-          };
-        } else {
-          newRootIds.push(newNodeId);
-        }
-
-        set({
-          chess: tempChess,
-          fen: tempChess.fen(),
-          nodes: newNodes,
-          rootNodeIds: newRootIds,
-          currentMoveId: newNodeId,
-          gameOver: newGameOver,
-        });
-        return true;
-      }
-      return false;
-    } catch (e) {
-      console.error('makeMove Error:', e);
-      return false;
-    }
-  },
-
-  resetGame: (config) => {
-    const newChess = new Chess();
-    set({
-      chess: newChess,
-      fen: newChess.fen(),
-      nodes: {},
-      rootNodeIds: [],
-      currentMoveId: null,
-      gameOver: null,
-      ...(config || {})
-    });
-  },
-
-  loadPgn: (pgn) => {
-    const newChess = new Chess();
-    try {
-      newChess.loadPgn(pgn);
-      const newHistory = newChess.history({ verbose: true }) as Move[];
-
-      // Convert linear history to nodes
-      const newNodes: Record<string, MoveNode> = {};
-      const newRootIds: string[] = [];
-      let parentId: string | null = null;
-      let lastId: string | null = null;
-
-      newHistory.forEach((move, i) => {
-        const id = `orig_${i}`;
-        newNodes[id] = {
-          id,
-          move,
-          classification: 'none',
-          score: null,
-          parentId,
-          childrenIds: [],
-        };
-        if (parentId) {
-          newNodes[parentId].childrenIds.push(id);
-        } else {
-          newRootIds.push(id);
-        }
-        parentId = id;
-        lastId = id;
-      });
-
-      set({
-        chess: newChess,
-        fen: newChess.fen(),
-        nodes: newNodes,
-        rootNodeIds: newRootIds,
-        currentMoveId: lastId,
-        gameOver: null
-      });
+      // Replay ancestors to retain repetition history and custom PGN start FEN.
+      const chess = chessAt(state, state.currentMoveId);
+      const result = chess.move(move);
+      const children = state.currentMoveId ? state.nodes[state.currentMoveId].childrenIds : state.rootNodeIds;
+      const existing = children.find(id => state.nodes[id].move.lan === result.lan);
+      if (existing) { get().goToMove(existing); return true; }
+      const id = crypto.randomUUID();
+      const node: MoveNode = { id, move: result, classification: 'none', score: null,
+        parentId: state.currentMoveId, childrenIds: [], engineBestMove };
+      const nodes = { ...state.nodes, [id]: node };
+      if (state.currentMoveId) nodes[state.currentMoveId] = { ...nodes[state.currentMoveId], childrenIds: [...children, id] };
+      set({ chess, fen: chess.fen(), nodes, currentMoveId: id, gameOver: gameResult(chess),
+        rootNodeIds: state.currentMoveId ? state.rootNodeIds : [...state.rootNodeIds, id],
+        preferredChildren: { ...state.preferredChildren, [state.currentMoveId ?? 'root']: id } });
       return true;
-    } catch (e) {
-      return false;
-    }
+    } catch { return false; }
   },
-
-  goToMove: (id) => {
-    const { nodes } = get();
-    if (id === null) {
-      set({ currentMoveId: null, fen: new Chess().fen() });
-    } else if (nodes[id]) {
-      set({ currentMoveId: id, fen: nodes[id].move.after });
-    }
-  }
+  resetGame: config => {
+    const chess = new Chess();
+    set({ chess, fen: chess.fen(), initialFen: chess.fen(), gameVersion: get().gameVersion + 1,
+      nodes: {}, rootNodeIds: [], currentMoveId: null, preferredChildren: {}, gameOver: null, ...config });
+  },
+  loadPgn: pgn => {
+    if (!pgn.trim()) return false;
+    try {
+      const chess = new Chess();
+      chess.loadPgn(pgn);
+      const history = chess.history({ verbose: true });
+      const initialFen = history[0]?.before ?? chess.fen();
+      const nodes: Record<string, MoveNode> = {};
+      const rootNodeIds: string[] = [];
+      const preferredChildren: Record<string, string> = {};
+      let parentId: string | null = null;
+      for (const move of history) {
+        const id = crypto.randomUUID();
+        nodes[id] = { id, move, classification: 'none', score: null, parentId, childrenIds: [] };
+        if (parentId) nodes[parentId].childrenIds.push(id);
+        else rootNodeIds.push(id);
+        preferredChildren[parentId ?? 'root'] = id;
+        parentId = id;
+      }
+      set({ chess, fen: chess.fen(), initialFen, nodes, rootNodeIds, currentMoveId: parentId,
+        preferredChildren, gameVersion: get().gameVersion + 1, gameOver: gameResult(chess), mode: 'preview' });
+      return true;
+    } catch { return false; }
+  },
+  goToMove: id => {
+    const state = get();
+    if (id !== null && !state.nodes[id]) return;
+    const chess = chessAt(state, id);
+    const preferredChildren = { ...state.preferredChildren };
+    for (const node of ancestors(state.nodes, id)) preferredChildren[node.parentId ?? 'root'] = node.id;
+    set({ currentMoveId: id, chess, fen: chess.fen(), gameOver: gameResult(chess), preferredChildren });
+  },
 }));
-

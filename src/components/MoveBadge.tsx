@@ -6,14 +6,15 @@ export function MoveBadge({ type }: MoveBadgeProps) {
   if (!type || type === 'none') return null;
 
   const badges: Record<string, { bg: string, text: string, label: string }> = {
+    uncertain: { bg: 'bg-zinc-500', text: 'text-zinc-100', label: '…' },
     'brilliant': { bg: 'bg-teal-400', text: 'text-teal-950', label: '!!' },
     'great': { bg: 'bg-blue-400', text: 'text-blue-950', label: '!' },
     'best': { bg: 'bg-green-500', text: 'text-green-950', label: '★' },
     'excellent': { bg: 'bg-emerald-400', text: 'text-emerald-950', label: '✓' },
     'good': { bg: 'bg-zinc-400', text: 'text-zinc-950', label: '👍' },
-    'inaccuracy': { bg: 'bg-yellow-400', text: 'text-yellow-950', label: '?' },
-    'mistake': { bg: 'bg-orange-500', text: 'text-orange-950', label: '?!' },
-    'blunder': { bg: 'bg-red-500', text: 'text-red-950', label: 'X' },
+    'inaccuracy': { bg: 'bg-yellow-400', text: 'text-yellow-950', label: '?!' },
+    'mistake': { bg: 'bg-orange-500', text: 'text-orange-950', label: '?' },
+    'blunder': { bg: 'bg-red-500', text: 'text-red-950', label: '??' },
     'book': { bg: 'bg-amber-700', text: 'text-amber-50', label: '📖' },
   };
 
