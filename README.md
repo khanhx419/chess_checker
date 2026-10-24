@@ -31,6 +31,7 @@ npm test
 - Nhãn **Thiên tài (!!)** là quy tắc riêng của ứng dụng: tìm sâu xác nhận nước thí Tượng/Mã/Xe/Hậu gần tối ưu, có biến hợp lệ chứng minh mất quân thật (không chỉ đổi/ăn lại quân), vẫn giữ thế cờ tốt. Tìm kiếm riêng tất cả nước khác kiểm tra việc thế cờ có vốn đã thắng dễ hay không. Cần kết quả cùng gốc ổn định ở depth ≥16; không gắn nhãn chỉ vì trùng bestmove. Quy tắc này thận trọng và chưa bao phủ mọi nước thí dài hạn; không tuyên bố giống hệt thuật toán Chess.com.
 - `engineBestMove`/`pvLine` thuộc thế cờ **trước** nước đi, dùng cho giải thích. `positionEvaluation` thuộc thế cờ **sau** nước đi, dùng cho thanh đánh giá và gợi ý trên bàn cờ.
 - Màn hình tác vụ vừa viewport; bàn cờ tự thu theo chiều cao/rộng và lịch sử có vùng cuộn riêng. Thông tin nước đang chọn không bị chôn dưới danh sách nước đi.
+- Trong màn hình chơi với máy, **Review ván đấu** chuyển trực tiếp sang Full Review mà giữ nguyên các nước đã chơi. Menu **Xuất** tải cả ván/nhánh đang chọn dưới dạng PGN hoặc ảnh bàn cờ hiện tại dưới dạng PNG, kể cả khi ván vừa kết thúc.
 - PGN dùng thế cờ xuất phát tùy chỉnh được giữ khi quay về đầu và tạo nhánh. Lịch sử nước đi được phát lại để nhận biết lặp lại ba lần.
 
 Stockfish được cung cấp bởi gói `stockfish` 19.0.1; giấy phép GPL-3.0 nằm trong `public/stockfish/Copying.txt`. Nguồn engine: [nmrugg/stockfish.js](https://github.com/nmrugg/stockfish.js), [Stockfish](https://github.com/official-stockfish/Stockfish).

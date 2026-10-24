@@ -170,6 +170,10 @@
   white-space: nowrap;
 }
 .sidebar-actions > button:last-child { margin-left: auto; }
+.export-actions { flex: 0 0 auto; }
+.export-actions summary { list-style: none; }
+.export-actions summary::-webkit-details-marker { display: none; }
+.engine-choice { flex-shrink: 0; }
 
 .evaluation-graph, .play-status, .move-navigation { flex: 0 0 auto; }
 .move-history {

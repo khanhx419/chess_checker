@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { CSSProperties } from 'react';
 import { Chess, Move } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import { useGameStore } from './store';
-import { RefreshCw, ClipboardType, FlipVertical2, Lightbulb, Swords } from 'lucide-react';
+import { RefreshCw, ClipboardType, FlipVertical2, Lightbulb, Swords, Download } from 'lucide-react';
+import { downloadBlob, exportBoardPng } from './exportGame';
 import { useEngine } from './useEngine';
 import { usePlayEngine } from './usePlayEngine';
 import { useGameReview } from './useGameReview';
@@ -24,6 +25,38 @@ function App() {
   const [engineRetry, setEngineRetry] = useState(0);
   const playError = usePlayEngine(mode === 'play', engineRetry);
   const { startReview, cancelReview, isReviewing, progress, error: reviewError } = useGameReview();
+  const gameVersion = useGameStore(state => state.gameVersion);
+  const [reviewRequest, setReviewRequest] = useState<{ version: number; id: number } | null>(null);
+  const handledReview = useRef(0);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+
+  useEffect(() => {
+    if (mode !== 'preview' || !reviewRequest || reviewRequest.version !== gameVersion || handledReview.current === reviewRequest.id) return;
+    handledReview.current = reviewRequest.id;
+    void startReview();
+  }, [mode, reviewRequest, gameVersion, startReview]);
+
+  function reviewPlayedGame() {
+    setMode('preview');
+    setReviewRequest(previous => ({ version: gameVersion, id: (previous?.id ?? 0) + 1 }));
+  }
+
+  async function exportGame(format: 'pgn' | 'png') {
+    document.querySelector('.export-actions')?.removeAttribute('open');
+    setExportError(null);
+    setIsExporting(true);
+    try {
+      if (format === 'pgn') {
+        downloadBlob(new Blob([useGameStore.getState().exportPgn()], { type: 'application/x-chess-pgn;charset=utf-8' }), 'chess-game.pgn');
+      } else {
+        const blackAtBottom = (mode === 'play' && playerColor === 'b') !== isFlipped;
+        await exportBoardPng(fen, blackAtBottom);
+      }
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'Không thể xuất ván đấu.');
+    } finally { setIsExporting(false); }
+  }
   const [pgnInput, setPgnInput] = useState('');
   const [showPgnInput, setShowPgnInput] = useState(false);
   const [moveFrom, setMoveFrom] = useState('');
@@ -512,17 +545,28 @@ function App() {
               >
                 <ClipboardType size={16} /> <span>Nhập PGN</span>
               </button>
+            </>
+          )}
               <button
-                onClick={startReview}
+                data-testid="review-game"
+                onClick={mode === 'play' ? reviewPlayedGame : startReview}
                 title="Phân tích lại toàn bộ ván đấu"
                 disabled={isReviewing || rootNodeIds.length === 0}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium border ${isReviewing ? 'bg-emerald-900/50 text-emerald-500 border-emerald-800 cursor-wait' : 'bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-400 border-emerald-500/30'} ${rootNodeIds.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
-                {isReviewing ? `Đang phân tích... ${progress}%` : '★ Full Review'}
+                {isReviewing ? `Đang phân tích... ${progress}%` : mode === 'play' ? '★ Review ván đấu' : '★ Full Review'}
               </button>
               {isReviewing && <button onClick={cancelReview} className="px-3 py-2 text-sm bg-zinc-800 rounded-lg">Hủy phân tích</button>}
-            </>
-          )}
+          <details className="export-actions relative">
+            <summary className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-zinc-800 border border-zinc-700 cursor-pointer text-xs"
+              aria-label="Xuất ván đấu"><Download size={15} />{isExporting ? 'Đang xuất…' : 'Xuất'}</summary>
+            <div className="export-menu absolute right-0 top-full mt-1 z-50 w-48 rounded-lg bg-zinc-800 border border-zinc-600 p-1 shadow-xl">
+              <button type="button" onClick={() => void exportGame('pgn')} disabled={isExporting || rootNodeIds.length === 0}
+                className="block w-full text-left hover:bg-zinc-700 rounded disabled:opacity-40">Tải ván đấu (.pgn)</button>
+              <button type="button" onClick={() => void exportGame('png')} disabled={isExporting}
+                className="block w-full text-left hover:bg-zinc-700 rounded disabled:opacity-40">Tải ảnh bàn cờ (.png)</button>
+            </div>
+          </details>
           <button
             onClick={() => {
               setTempBotElo(botElo);
@@ -535,6 +579,7 @@ function App() {
             <RefreshCw size={16} /> <span className={mode === 'preview' ? 'sr-only' : ''}>Ván mới</span>
           </button>
         </div>
+          {exportError && <p role="alert" className="relative z-10 text-xs text-red-400">{exportError}</p>}
 
           {mode === 'preview' && (
             <label className="engine-choice relative z-10 flex items-center gap-2 text-xs text-zinc-400" title={ENGINE_PROFILES[engineProfile].description}>

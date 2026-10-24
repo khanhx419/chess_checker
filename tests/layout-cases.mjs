@@ -62,7 +62,7 @@ export async function testLayout(page, { screenshotsDir } = {}) {
       const rail = await visibleBounds('.nav-rail');
       assert.ok(rail.x === 0 && rail.y === 0 && rail.width <= 64 && rail.height === height,
         `Navigation stays in a left rail at ${width}x${height}`);
-      const headerButtons = await page.$$eval('.app-header button, .sidebar-actions button', buttons => buttons.map(button => {
+      const headerButtons = await page.$$eval('.app-header button, .sidebar-actions button', buttons => buttons.filter(button => button.getClientRects().length).map(button => {
         const rect = button.getBoundingClientRect();
         return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom };
       }));

@@ -37,6 +37,8 @@ interface GameState {
   fen: string;
   initialFen: string;
   gameVersion: number;
+  gameHeaders: Record<string, string>;
+  declaredResultFen?: string;
   nodes: Record<string, MoveNode>;
   rootNodeIds: string[];
   currentMoveId: string | null;
@@ -54,6 +56,7 @@ interface GameState {
   goToMove: (id: string | null) => void;
   getActiveLine: () => MoveNode[];
   getSelectedLine: () => MoveNode[];
+  exportPgn: () => string;
   setMode: (mode: AppMode) => void;
   setPlayerColor: (color: PlayerColor) => void;
   setBotElo: (elo: number) => void;
@@ -99,7 +102,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     }]));
     set({ engineProfile: profile, nodes, gameVersion: get().gameVersion + 1 });
   },
-  chess: new Chess(), fen: new Chess().fen(), initialFen: new Chess().fen(), gameVersion: 0,
+  chess: new Chess(), fen: new Chess().fen(), initialFen: new Chess().fen(), gameVersion: 0, gameHeaders: {},
   nodes: {}, rootNodeIds: [], currentMoveId: null, preferredChildren: {},
   mode: 'preview', playerColor: 'w', botElo: 1500, gameOver: null,
   updateNode: (id, data) => get().updateNodes({ [id]: data }),
@@ -132,6 +135,19 @@ export const useGameStore = create<GameState>((set, get) => ({
   setPlayerColor: playerColor => set({ playerColor }),
   setBotElo: botElo => set({ botElo }),
   setGameOver: gameOver => set({ gameOver }),
+  exportPgn: () => {
+    const state = get();
+    const line = state.getSelectedLine();
+    const chess = chessAt(state, line.at(-1)?.id ?? null);
+    for (const [key, value] of Object.entries(state.gameHeaders)) {
+      if (!['FEN', 'SetUp', 'Result'].includes(key)) chess.setHeader(key, value);
+    }
+    chess.setHeader('Event', state.gameHeaders.Event ?? 'Chess Checker Pro');
+    const result = gameResult(chess);
+    chess.setHeader('Result', result ? result.winner === 'w' ? '1-0' : result.winner === 'b' ? '0-1' : '1/2-1/2' :
+      chess.fen() === state.declaredResultFen ? state.gameHeaders.Result ?? '*' : '*');
+    return chess.pgn({ maxWidth: 80 });
+  },
   deleteNode: id => {
     const state = get();
     if (!state.nodes[id]) return;
@@ -176,7 +192,9 @@ export const useGameStore = create<GameState>((set, get) => ({
   resetGame: config => {
     const chess = new Chess();
     set({ chess, fen: chess.fen(), initialFen: chess.fen(), gameVersion: get().gameVersion + 1,
-      nodes: {}, rootNodeIds: [], currentMoveId: null, preferredChildren: {}, gameOver: null, ...config });
+      nodes: {}, rootNodeIds: [], currentMoveId: null, preferredChildren: {}, gameOver: null,
+      declaredResultFen: undefined, gameHeaders: config ? { White: (config.playerColor ?? get().playerColor) === 'w' ? 'Player' : 'Stockfish 19',
+        Black: (config.playerColor ?? get().playerColor) === 'b' ? 'Player' : 'Stockfish 19' } : {}, ...config });
   },
   loadPgn: pgn => {
     if (!pgn.trim()) return false;
@@ -198,6 +216,7 @@ export const useGameStore = create<GameState>((set, get) => ({
         parentId = id;
       }
       set({ chess, fen: chess.fen(), initialFen, nodes, rootNodeIds, currentMoveId: parentId,
+        gameHeaders: chess.getHeaders(), declaredResultFen: chess.fen(),
         preferredChildren, gameVersion: get().gameVersion + 1, gameOver: gameResult(chess), mode: 'preview' });
       return true;
     } catch { return false; }

@@ -5,6 +5,7 @@ import { testAnalysis } from './analysis-cases.mjs';
 import { testLayout } from './layout-cases.mjs';
 import { testEngineProfiles } from './engine-profile-cases.mjs';
 import { testBrilliance } from './brilliance-cases.mjs';
+import { testPostGame } from './post-game-cases.mjs';
 
 const server = await createServer({
   server: { host: '127.0.0.1', port: 0 }, logLevel: 'error',
@@ -376,6 +377,7 @@ try {
   assert.ok(brilliant.proof.includes('thiên tài') && brilliant.proof.includes('Rxg8') && brilliant.proof.includes('Nf7#'));
   pass('Real Stockfish 19 confirms Qg8+!! Rxg8 Nf7# and the UI explains the verified queen sacrifice');
 
+  for (const name of await testPostGame(page)) pass(name);
   const viewportCount = await testLayout(page);
   pass(`Single-viewport board, history, explanation and dialogs fit ${viewportCount} desktop/mobile sizes`);
 
