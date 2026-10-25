@@ -2,17 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useGameStore } from './store';
 import { createEngine, errorMessage, isAbortError } from './engine';
 import type { UciEngine } from './engine';
-
-function getSkillLevel(elo: number) {
-  if (elo <= 800) return 0;
-  if (elo <= 1000) return 3;
-  if (elo <= 1200) return 5;
-  if (elo <= 1500) return 8;
-  if (elo <= 1800) return 12;
-  if (elo <= 2000) return 15;
-  if (elo <= 2500) return 18;
-  return 20;
-}
+import { botSearchOptions, chooseBotMove } from './botStrength';
 
 export function usePlayEngine(enabled: boolean, retryKey = 0) {
   const engineRef = useRef<Promise<UciEngine> | null>(null);
@@ -41,13 +31,14 @@ export function usePlayEngine(enabled: boolean, retryKey = 0) {
         if (!engine || controller.signal.aborted) return;
         setError(null);
         const result = await engine.analyze(fen, {
-          signal: controller.signal, depth: 12, movetime: 600, skill: getSkillLevel(botElo),
+          ...botSearchOptions(botElo), signal: controller.signal,
         });
+        const move = chooseBotMove(fen, botElo, result);
         const state = useGameStore.getState();
         if (controller.signal.aborted || state.mode !== 'play' || state.fen !== fen ||
             state.gameVersion !== gameVersion || state.currentMoveId !== currentMoveId ||
-            state.playerColor !== playerColor || state.gameOver || !result.bestMove) return;
-        state.makeMove({ from: result.bestMove.slice(0, 2), to: result.bestMove.slice(2, 4), promotion: result.bestMove[4] });
+            state.playerColor !== playerColor || state.botElo !== botElo || state.gameOver || !move) return;
+        state.makeMove({ from: move.slice(0, 2), to: move.slice(2, 4), promotion: move[4] });
       } catch (error) {
         if (!controller.signal.aborted && !isAbortError(error)) setError({ message: errorMessage(error), fen });
       }

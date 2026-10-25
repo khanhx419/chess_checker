@@ -6,6 +6,7 @@ import { testLayout } from './layout-cases.mjs';
 import { testEngineProfiles } from './engine-profile-cases.mjs';
 import { testBrilliance } from './brilliance-cases.mjs';
 import { testPostGame } from './post-game-cases.mjs';
+import { testBotStrength } from './bot-strength-cases.mjs';
 
 const server = await createServer({
   server: { host: '127.0.0.1', port: 0 }, logLevel: 'error',
@@ -94,6 +95,7 @@ try {
   assert.equal(protocol, true);
   pass('UCI cancellation drains stale output, serializes searches, normalizes Black scores, and settles disposal/timeouts');
   for (const name of await testAnalysis(harness)) pass(name);
+  for (const name of await testBotStrength(harness)) pass(name);
   for (const name of await testBrilliance(harness)) pass(name);
   for (const name of await testEngineProfiles(harness)) pass(name);
 

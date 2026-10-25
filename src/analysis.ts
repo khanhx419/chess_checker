@@ -25,7 +25,7 @@ export function moveLoss(node: MoveNode, before: EngineEval, after: EngineEval, 
   const candidate = playedEvaluation ?? after;
   const side = node.move.color === 'w' ? 1 : -1;
   const played = `${node.move.from}${node.move.to}${node.move.promotion ?? ''}`;
-  if (played === before.bestMove) return 0;
+  if (played === before.bestMove && !playedEvaluation) return 0;
   // Mate distance changes are not centipawn losses. Classification handles a
   // change of winner separately; a longer forced mate is still winning.
   if (before.mate !== undefined || candidate.mate !== undefined) return 0;
@@ -41,7 +41,8 @@ export function classifyMove(node: MoveNode, before: EngineEval, after: EngineEv
   const played = `${node.move.from}${node.move.to}${node.move.promotion ?? ''}`;
   // An after-position search can see deeper tactics. Never call the root
   // search's own best move a mistake because the independent scores drifted.
-  if (played === before.bestMove) return 'best';
+  if (played === before.bestMove && (!playedEvaluation || playedEvaluation === before ||
+      (playedEvaluation.mate === before.mate && Math.abs(evaluationScore(playedEvaluation) - evaluationScore(before)) <= 25))) return 'best';
 
   const candidate = playedEvaluation ?? after;
   const side = node.move.color === 'w' ? 1 : -1;

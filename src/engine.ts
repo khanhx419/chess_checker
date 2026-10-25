@@ -29,6 +29,10 @@ export interface EngineEval {
   elapsedMs?: number;
   targetDepth?: number;
   searchMoves?: string[];
+  comparisonMoves?: string[];
+  strengthLimited?: boolean;
+  selectedMove?: string;
+  variations?: EngineEval[];
   previous?: { cp?: number; mate?: number; bestMove?: string; depth: number };
 }
 
@@ -37,6 +41,8 @@ export interface SearchOptions {
   depth?: number;
   movetime?: number;
   skill?: number;
+  elo?: number;
+  multiPv?: number;
   onInfo?: (evaluation: EngineEval) => void;
   searchMoves?: string[];
 }
@@ -122,9 +128,11 @@ export class UciEngine {
         throw new Error('Nước đi cần kiểm tra không hợp lệ ở thế cờ này.');
       }
       const started = performance.now();
+      const limited = options.elo !== undefined || (options.skill !== undefined && options.skill < 20);
+      const multiPv = Math.max(1, Math.min(options.multiPv ?? 1, chess.moves().length));
       const metadata = () => ({ engineId: this.engineId, engineName: this.engineName,
         analyzedAt: Date.now(), elapsedMs: Math.round(performance.now() - started), targetDepth: options.depth ?? 20,
-        searchMoves: options.searchMoves });
+        searchMoves: options.searchMoves, strengthLimited: limited });
       if (chess.isCheckmate()) {
         return { fen, depth: 0, finished: true, mate: 0, mateWinner: chess.turn() === 'w' ? 'b' as const : 'w' as const, ...metadata() };
       }
@@ -132,6 +140,8 @@ export class UciEngine {
 
       return new Promise<EngineEval>((resolve, reject) => {
         let latest: EngineEval = { fen, depth: 0, finished: false };
+        const ranks = new Map<number, EngineEval>();
+        let complete: EngineEval[] | undefined;
         const black = chess.turn() === 'b';
         const cleanup = () => {
           clearTimeout(timer);
@@ -148,16 +158,26 @@ export class UciEngine {
             const pv = line.match(/\bpv (.+)$/)?.[1].split(/\s+/);
             const value = Number(score[2]) * (black ? -1 : 1);
             const depth = Number(line.match(/\bdepth (\d+)/)?.[1] ?? latest.depth);
-            const previous = depth > latest.depth && latest.depth > 0
-              ? { cp: latest.cp, mate: latest.mate, bestMove: latest.bestMove, depth: latest.depth } : latest.previous;
-            latest = {
+            const rank = Number(line.match(/\bmultipv (\d+)/)?.[1] ?? 1);
+            const prior = ranks.get(rank);
+            const previous = prior && depth > prior.depth
+              ? { cp: prior.cp, mate: prior.mate, bestMove: prior.bestMove, depth: prior.depth } : prior?.previous;
+            const evaluation: EngineEval = {
               fen, finished: false, depth, previous, engineId: this.engineId, engineName: this.engineName,
               cp: score[1] === 'cp' ? value : undefined,
               mate: score[1] === 'mate' ? value : undefined,
               mateWinner: score[1] === 'mate' ? (value > 0 ? 'w' : 'b') : undefined,
-              bestMove: pv?.[0] ?? latest.bestMove, pvLine: pv ?? latest.pvLine,
+              bestMove: pv?.[0], pvLine: pv,
             };
-            options.onInfo?.(latest);
+            ranks.set(rank, evaluation);
+            // Never mix candidate scores from different iterations. A timeout
+            // can interrupt MultiPV halfway through its next depth.
+            const iteration = Array.from({ length: multiPv }, (_, index) => ranks.get(index + 1));
+            if (iteration.every((entry): entry is EngineEval => !!entry && entry.depth === depth)) complete = iteration;
+            if (rank === 1) {
+              latest = evaluation;
+              options.onInfo?.(latest);
+            }
           } else if (line.startsWith('bestmove ')) {
             cleanup();
             if (options.signal?.aborted) { reject(abortError()); return; }
@@ -168,7 +188,9 @@ export class UciEngine {
             }
             // Keep the score tied to its exact PV. A timed search may finish a
             // partial iteration with a different bestmove but no exact score.
-            resolve({ ...latest, bestMove: options.skill !== undefined && options.skill < 20 ? bestMove : latest.bestMove ?? bestMove,
+            const result = multiPv > 1 && complete ? complete[0] : latest;
+            resolve({ ...result, bestMove: result.bestMove ?? bestMove, selectedMove: bestMove,
+              variations: multiPv > 1 ? complete?.map(entry => ({ ...entry, finished: true, ...metadata() })) : undefined,
               finished: true, ...metadata() });
           }
         };
@@ -176,7 +198,10 @@ export class UciEngine {
         this.listeners.add(onLine);
         this.failures.add(onError);
         options.signal?.addEventListener('abort', onAbort, { once: true });
+        this.worker.postMessage(`setoption name UCI_LimitStrength value ${options.elo !== undefined}`);
+        if (options.elo !== undefined) this.worker.postMessage(`setoption name UCI_Elo value ${Math.max(1320, Math.min(3190, Math.round(options.elo)))}`);
         this.worker.postMessage(`setoption name Skill Level value ${options.skill ?? 20}`);
+        this.worker.postMessage(`setoption name MultiPV value ${multiPv}`);
         this.worker.postMessage(`position fen ${fen}`);
         this.worker.postMessage(`go depth ${options.depth ?? 20} movetime ${options.movetime ?? 900}${options.searchMoves?.length ? ` searchmoves ${options.searchMoves.join(' ')}` : ''}`);
       });
@@ -228,7 +253,7 @@ export function clearCachedEvaluations(fens: Iterable<string>) {
   for (const fen of fens) evaluations.delete(fen);
 }
 export function cacheEvaluation(evaluation: EngineEval) {
-  if (!evaluation.finished || evaluation.error || evaluation.searchMoves?.length) return;
+  if (!evaluation.finished || evaluation.error || evaluation.searchMoves?.length || evaluation.comparisonMoves?.length || evaluation.strengthLimited) return;
   if (evaluation.engineId && evaluation.engineId !== ENGINE_PROFILES[getEngineProfile()].id) return;
   const existing = evaluations.get(evaluation.fen);
   // Adjacent review tasks share positions. A quick neighbor must not replace

@@ -370,7 +370,7 @@ function App() {
 
             <div className="flex flex-col gap-4">
               <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-2">Độ khó Bot (ELO)</label>
+                <label className="block text-sm font-medium text-zinc-400 mb-2">Độ khó Bot (Elo ước lượng)</label>
                 <select
                    value={tempBotElo}
                    onChange={(e) => setTempBotElo(Number(e.target.value))}
@@ -596,7 +596,7 @@ function App() {
           {mode === 'play' && (
             <div className="play-status p-4 bg-zinc-800/50 rounded-xl border border-zinc-700/50 flex flex-col gap-3 z-10 relative">
                <div className="flex justify-between items-center">
-                 <span className="text-sm text-zinc-400 font-medium">Độ khó (ELO)</span>
+                 <span className="text-sm text-zinc-400 font-medium">Elo ước lượng</span>
                  <select
                    value={botElo}
                    onChange={(e) => setBotElo(Number(e.target.value))}
